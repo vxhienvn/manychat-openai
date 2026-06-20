@@ -182,7 +182,7 @@ Khách vừa nhắn:
 Không cố tư vấn quá sâu khi chưa có thông tin liên hệ.
 
 
-        
+        `,
     });
 
     return response.output_text || "Dạ anh/chị cho em xin số điện thoại/Zalo để tư vấn mẫu phù hợp ạ.";
@@ -193,13 +193,15 @@ async function sendMessage(senderId, text) {
         `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
         {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
+            headers: {
+                'Content-Type': 'application/json'
+            },
             body: JSON.stringify({
                 recipient: { id: senderId },
                 message: { text }
             })
         }
-    );
+    )
 }
 
 app.post('/webhook', async (req, res) => {
