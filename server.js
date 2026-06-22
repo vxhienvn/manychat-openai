@@ -187,6 +187,192 @@ async function sendMessage(senderId, text) {
     }
 }
 
+
+async function sendComboCarousel(senderId) {
+    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            recipient: { id: senderId },
+            message: {
+                attachment: {
+                    type: "template",
+                    payload: {
+                        template_type: "generic",
+                        elements: [
+                            {
+                                title: "Combo phòng tắm cơ bản",
+                                subtitle: "Tầm giá 4-6 triệu, phù hợp phòng tắm phổ thông",
+                                image_url: "https://scontent.fhan5-2.fna.fbcdn.net/v/t45.1600-4/721841502_3407023772807451_2219495493695105387_n.jpg?stp=dst-webp_fr_q75&_nc_cat=104&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeFmFpWydFScpHjZfZGIegsMnheWmvwORraeF5aa_A5Gtshvo5X27hDJxdHeib2fiKmaVuK0QZQfMqNZl0IwaXn2&_nc_ohc=1_7eDbD6dxgQ7kNvwEKcNjN&_nc_oc=AdqWd_2C8PLDr7llHjd9sGmu9MfMK4qRr9DjS4kS_mUXqSqO3nhkLgXMt6-CYgUr-qE&_nc_zt=1&_nc_ht=scontent.fhan5-2.fna&_nc_gid=kgSpCXlGMGObHmpM1uqlrQ&_nc_ss=7b2a8&oh=00_Af_yyrtvN6FYDEdWkds0WvrlBjF-MVk9K_EDfDjDCLH7MQ&oe=6A3F173F",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Combo phòng tắm đẹp",
+                                subtitle: "Tầm giá 6-9 triệu, mẫu đẹp hơn, phối đồng bộ",
+                                image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/724414534_3407023669474128_6654698488176819038_n.jpg?stp=dst-webp_fr_q75&_nc_cat=101&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeHACvlu0KvhLkjXOnnf6bOw9_sCnHDN9e_3-wKccM317-sN6_nRJrk0WbCMlpYG3AEXlLniBnW1DHIgvHDYTaA9&_nc_ohc=6WemwsdtinoQ7kNvwHVRB0a&_nc_oc=AdouwRUdoydBWrxsA-QQphXYGoL9DvO5Dmd282j-5hvGZfg931KjXi_KohvZa7l98xo&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=u-xhVRGH8O-Wqel_CNFKtw&_nc_ss=7b2a8&oh=00_Af_IKdEht3IyCtadRcq8idmCtJvhSh3JyPCFWa7WpOHD0A&oe=6A3F0FE9",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Combo phòng tắm cao cấp",
+                                subtitle: "Từ 10 triệu trở lên, phù hợp nhà mới, biệt thự, khách sạn",
+                                image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/728503197_3412240415619120_7947162624555401843_n.jpg?stp=dst-jpg_s168x128_tt6&_nc_cat=111&ccb=1-7&_nc_sid=d73f9c&_nc_eui2=AeF3mk0nPsH2Q9Tj_wooFLnspveGQ3uv0Iqm94ZDe6_QihRdvyEEDe7E6_f1A-xPZA1mLA6EZ-40_6TLeqDdD4NH&_nc_ohc=Yg1pDqiM0jwQ7kNvwGkgVuD&_nc_oc=Adprj7JBg-qAMY54CeYbt5CqkBc7jGGTz_0PEt2leWO0N-q-cyWk7PvA_rvArjTHTEQ&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=wVvG2jY_v91j5WXpHxrLyQ&_nc_ss=7b2a8&oh=00_Af-JfZhRivnIp5IXW8ZJT9eb5hXk0idM4mMk7r73vTnhPA&oe=6A3F2726",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        })
+    });
+
+    const result = await response.text();
+    console.log("Combo carousel status:", response.status);
+    console.log("Combo carousel result:", result);
+}
+
+async function sendFanCarousel(senderId) {
+    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            recipient: { id: senderId },
+            message: {
+                attachment: {
+                    type: "template",
+                    payload: {
+                        template_type: "generic",
+                        elements: [
+                            {
+                                title: "Quạt trần 5 cánh 55W",
+                                subtitle: "Phù hợp phòng vừa, mẫu hiện đại, dễ phối nội thất",
+                                image_url: "https://scontent.fhan5-2.fna.fbcdn.net/v/t45.1600-4/727719223_3412214488955046_3127207876950040699_n.jpg?_nc_cat=102&ccb=1-7&_nc_sid=d5bd00&_nc_eui2=AeGIbhNqPizCG827jRKi2ujsHQ5r-eC51B0dDmv54LnUHXQPXRcQPF7TG8HJicZfMBYw702DbO6KpFWzJH9aJm5T&_nc_ohc=V-ExMLpYn9EQ7kNvwGsOcGj&_nc_oc=Adr5zBbqRVUNFvx2QhS0oYraja93d0EFWSWxPusfqiE-r3ppgR8l4wSWdCKpgCnaf24&_nc_zt=1&_nc_ht=scontent.fhan5-2.fna&_nc_gid=bcw2J8GkfUEXJriVz1oLOQ&_nc_ss=7b2a8&oh=00_Af_YhRRmZgntjGTgS36kmpcsqaU1W_kyjRzgDCs2mVLdwA&oe=6A3F095A",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Quạt trần 5 cánh 90W",
+                                subtitle: "Gió mạnh hơn, phù hợp phòng lớn hoặc cần thoáng mát",
+                                image_url: "https://scontent.fhan5-8.fna.fbcdn.net/v/t45.1600-4/729088829_3412214475621714_8370697354332284349_n.jpg?_nc_cat=108&ccb=1-7&_nc_sid=d5bd00&_nc_eui2=AeEXTBgj2blEZtj5XpRbwq_fJE2SQubOxP8kTZJC5s7E_4rIdsmmzF-6HyCiTRpgvp306okGBoT89V91lrhOh31h&_nc_ohc=Sv01MBSqGuYQ7kNvwERCf_a&_nc_oc=AdoCjduM22tUgLaO3keafuLJsnERx0hZWZPntd6VrkH0quDRDZgzHL2iS7NIZSvT9uc&_nc_zt=1&_nc_ht=scontent.fhan5-8.fna&_nc_gid=aJDU5max7NArlA__yCpytQ&_nc_ss=7b2a8&oh=00_Af_l1bxVslTjPhOMBSODpzbWSJOz90pDwRY5KayP9dc3Mw&oe=6A3F1053",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Quạt 8 cánh vàng gương",
+                                subtitle: "Mẫu sang, hợp phòng khách, biệt thự, nhà hàng",
+                                image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/728760035_3412214442288384_2821812757948103391_n.jpg?_nc_cat=101&ccb=1-7&_nc_sid=d5bd00&_nc_eui2=AeE1gLmEnYhcYcAdRm8Y4Efkto6qjVItQGq2jqqNUi1AapSW-7fcjspTeNE7RfslV2U2aqUW60_vaRtgX98O0UA4&_nc_ohc=tYU3byEPwI4Q7kNvwFf8Y9R&_nc_oc=AdqDOn6-rpBe36YXADWcDu7GdCx10JwawIw2QXny5P8lsKet-WABjseVL42k6xqPB4k&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=Sq569PbIRY0sEDsucJnQeA&_nc_ss=7b2a8&oh=00_Af-gu2ESXEnmmi83L6x99RSXRZ2vAwc_iVahh3CxEpzuSw&oe=6A3EF448",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            },
+                            {
+                                title: "Quạt 10 cánh cao cấp",
+                                subtitle: "Sải lớn, hợp phòng khách rộng, không gian sang trọng",
+                                image_url: "https://scontent.fhan5-9.fna.fbcdn.net/v/t45.1600-4/728597413_3412225568953938_5048258706912707012_n.jpg?_nc_cat=110&ccb=1-7&_nc_sid=d5bd00&_nc_eui2=AeF9_KEAt19bMbLGn9ImPdBErXek8XEmc1Std6TxcSZzVJcqNZD2S29UtKFH2hKEKAanUmzGmvpFHDAbbuFUebxx&_nc_ohc=9hQEkg60bncQ7kNvwFMP4Qb&_nc_oc=AdoO5dx259kvQ_3xJWioFcjyyCEHM9XD2jwHQ5Jn2d78H8ZBjY6JwcRy6QbFFIm6P8E&_nc_zt=1&_nc_ht=scontent.fhan5-9.fna&_nc_gid=H81qwU0PpFnPWUSKJeZqCw&_nc_ss=7b2a8&oh=00_Af8j0NRqieKJFAi1UyLA5JHDTbH_cX8-3a8q1Oi9S-uAiw&oe=6A3F1338",
+                                buttons: [
+                                    {
+                                        type: "phone_number",
+                                        title: "Gọi tư vấn",
+                                        payload: "0973693677"
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        })
+    });
+
+    const result = await response.text();
+    console.log("Fan carousel status:", response.status);
+    console.log("Fan carousel result:", result);
+}
+
+async function sendProductCarouselIfNeeded(senderId, customerMessage, history) {
+    const text = `${customerMessage}\n${history}`.toLowerCase();
+
+    const wantsImage =
+        text.includes("gửi ảnh") ||
+        text.includes("gui anh") ||
+        text.includes("xem mẫu") ||
+        text.includes("xem mau") ||
+        text.includes("gửi mẫu") ||
+        text.includes("gui mau") ||
+        text.includes("cho xem") ||
+        text.includes("ảnh") ||
+        text.includes("anh");
+
+    const isFan =
+        text.includes("quạt") ||
+        text.includes("quat") ||
+        text.includes("quạt trần") ||
+        text.includes("quạt đèn");
+
+    const isCombo =
+        text.includes("combo") ||
+        text.includes("phòng tắm") ||
+        text.includes("phong tam") ||
+        text.includes("nhà tắm") ||
+        text.includes("nha tam") ||
+        text.includes("thiết bị vệ sinh") ||
+        text.includes("thiet bi ve sinh") ||
+        text.includes("bồn cầu") ||
+        text.includes("bon cau") ||
+        text.includes("lavabo") ||
+        text.includes("sen tắm");
+
+    if (!wantsImage) return;
+
+    if (isFan) {
+        await sendFanCarousel(senderId);
+        return;
+    }
+
+    if (isCombo) {
+        await sendComboCarousel(senderId);
+    }
+}
+
 async function handleMessage(event) {
     if (!event.message || !event.message.text) return;
     if (event.message.is_echo) return;
@@ -234,6 +420,9 @@ async function handleMessage(event) {
     console.log("AI Reply:", aiReply);
 
     await sendMessage(senderId, aiReply);
+
+    // Nếu khách xin xem ảnh/mẫu, tự gửi carousel phù hợp
+    await sendProductCarouselIfNeeded(senderId, customerMessage, history);
 }
 
 app.post('/webhook', async (req, res) => {
