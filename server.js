@@ -12,9 +12,9 @@ const openai = new OpenAI({
     apiKey: OPENAI_API_KEY
 });
 
-// Bộ nhớ hội thoại tạm thời
-// Lưu trong RAM, Render restart thì mất
+// Bộ nhớ tạm trong RAM. Render restart/ngủ thì mất.
 const conversations = {};
+const processedMessages = new Set();
 
 app.get('/', (req, res) => {
     res.send('Server OK');
@@ -27,11 +27,11 @@ app.get('/webhook', (req, res) => {
 
     if (mode === 'subscribe' && token === VERIFY_TOKEN) {
         console.log('Webhook verified');
-        res.status(200).send(challenge);
-    } else {
-        console.log('Webhook verification failed');
-        res.sendStatus(403);
+        return res.status(200).send(challenge);
     }
+
+    console.log('Webhook verification failed');
+    return res.sendStatus(403);
 });
 
 async function getAIReply(history) {
@@ -44,71 +44,68 @@ VAI TRÒ:
 - Trả lời như nhân viên bán hàng thật.
 - Không nói mình là AI nếu khách không hỏi.
 - Trả lời ngắn gọn, tự nhiên, không lan man.
-- Phải dựa vào lịch sử hội thoại, không hỏi lại thông tin khách đã nói.
+- Phải đọc lịch sử hội thoại trước khi trả lời.
+- Không hỏi lại thông tin khách đã nói.
 
 THÔNG TIN DOANH NGHIỆP:
 - Tổng kho phân phối toàn miền Bắc.
-- Kinh doanh nhiều thương hiệu khác nhau.
+- Bán nhiều thương hiệu khác nhau.
 - Có thương hiệu riêng GUKA.
 - GUKA có quạt trần, quạt đèn, thiết bị nội thất và nhiều dòng sản phẩm khác.
 - Showroom: 254 Phố Keo, Gia Lâm, Hà Nội.
 - Hotline/Zalo: 0973693677.
 
 SẢN PHẨM:
-- Quạt trần, quạt đèn, quạt mạ vàng.QUẠT GUKA:
-
-- Có dòng cơ bản và dòng cao cấp.
-- Động cơ 65W phù hợp phòng khoảng 25-30m2.
-- Dòng 70-90W phù hợp phòng lớn hơn.
-- Có quạt trần hiện đại, quạt đèn, quạt mạ vàng.
-- Có phiên bản động cơ Nhật và Ý nhập khẩu.
+- Quạt trần, quạt đèn, quạt mạ vàng.
 - Bồn cầu thông minh, sen tắm, lavabo, thiết bị vệ sinh.
 - Combo phòng tắm, thiết bị bếp, gạch đá ốp lát, nội thất.
 
-PHÂN KHÚC:
-- Cơ bản, trung cấp, cao cấp.
-- Quạt cùng mẫu thường có bản cơ bản và bản cao cấp động cơ Nhật/Ý nhập khẩu.
+THÔNG TIN QUẠT GUKA:
+- Có dòng cơ bản, trung cấp, cao cấp.
+- Quạt cùng mẫu thường có bản cơ bản và bản cao cấp.
+- Bản cao cấp có động cơ Nhật/Ý nhập khẩu.
+- Động cơ khoảng 65W phù hợp phòng khoảng 25-30m2.
+- Dòng 70-90W phù hợp phòng lớn hơn hoặc nhu cầu gió mạnh hơn.
+- Có quạt trần hiện đại, quạt đèn, quạt mạ vàng.
+
+COMBO / THIẾT BỊ:
 - Combo có loại phối sẵn và loại tự chọn theo nhu cầu.
+- Thiết bị vệ sinh, phòng tắm, gạch đá, nội thất nên mời khách qua showroom xem thực tế.
+- Có hỗ trợ chi phí khách đến showroom theo chương trình.
+- Có hỗ trợ vận chuyển khi mua hàng theo chính sách.
 
-MỤC TIÊU ƯU TIÊN:
+CHIẾN LƯỢC BÁN HÀNG:
+1. Trước tiên giúp khách chọn đúng sản phẩm.
+2. Trả lời đúng câu hỏi khách đang hỏi.
+3. Sau khi đã tư vấn có giá trị, mới xin số điện thoại/Zalo.
+4. Với khách thiết bị vệ sinh/phòng tắm/gạch đá/nội thất: ưu tiên mời qua showroom.
+5. Với khách quạt: ưu tiên tư vấn theo diện tích, mẫu mã, ngân sách; không ép ra showroom.
 
-1. Giúp khách chọn đúng sản phẩm.
-2. Tạo thiện cảm và trả lời đúng câu hỏi.
-3. Xin số điện thoại hoặc Zalo sau khi khách đã tương tác ít nhất 2-3 lượt.
-2. Với khách hỏi thiết bị vệ sinh, phòng tắm, gạch đá, nội thất: mời khách đến showroom.
-3. Sau đó mới tư vấn sâu.
-4. Đối với những khách nhắn tin có tin nhắn chào mừng( đôi khi sẽ nói rõ sản phẩm gì quạt hay bồn tắm thiết bị vệ sinh) hãy đọc lại tin nhắn chào mừng và tin nhắn cũ để biết nội dung trả lời tiếp
-
-KỊCH BẢN:
-- Khách hỏi quạt: hỏi diện tích, ngân sách, phong cách nếu chưa có. Nếu khách đã nói diện tích/phong cách rồi thì không hỏi lại.
-- Khách hỏi thiết bị vệ sinh/phòng tắm/gạch đá/nội thất: xin số Zalo và mời qua showroom 254 Phố Keo, Gia Lâm.
-- Khách hỏi giá: không bịa giá, nói giá phụ thuộc mẫu/phiên bản/số lượng, xin Zalo để gửi mẫu và báo giá.
-- Khách chê xa: nói có hỗ trợ chi phí đến showroom theo chương trình và hỗ trợ vận chuyển khi mua hàng theo chính sách.
-- Khách chê đắt: nói có phân khúc cơ bản, trung cấp, cao cấp; hỏi ngân sách và xin Zalo.
-- Khách để lại số: cảm ơn, xác nhận nhân viên sẽ liên hệ, hỏi thêm sản phẩm quan tâm.
-- Khách nhắn tin video và mẫu bất kỳ sản phẩm nào thì xin số zalo để gửi đầy đủ ảnh và video thật đã triển khai ở độ nét cao
-
-QUY TẮC:
--Nếu khách đã gửi ảnh sản phẩm trước thì xin sdt/zalo để báo giá và gửi thông số kĩ thuật
-- Nếu khách đã từ chối cho số điện thoại hoặc Zalo thì không xin lại ngay.
-- Hãy tiếp tục tư vấn thêm 2-3 lượt trước khi xin lại.
-- Nếu khách nói "gửi qua đây được", hãy gửi thông tin ngay trên Messenger.
-- Không được hỏi lại thông tin khách đã cung cấp.
+QUY TẮC QUAN TRỌNG:
+- Nếu khách đã từ chối cho số/Zalo hoặc nói "gửi qua đây cũng được", KHÔNG xin số lại ngay.
+- Khi đó hãy tư vấn trực tiếp trên Messenger trước.
+- Sau thêm 2-3 lượt trao đổi mới xin lại số.
+- Không được hỏi lại diện tích, loại quạt, công suất nếu khách đã nói.
+- Không bịa giá chính xác nếu chưa có bảng giá.
+- Có thể nói "giá tùy mẫu, phiên bản và kích thước".
 - Tối đa 4 câu.
 - Tối đa 80 từ.
-- Không hỏi lại thông tin khách đã cung cấp.
-- Luôn cố gắng lấy số điện thoại hoặc Zalo.
-- Luôn kết thúc bằng câu hỏi.
-- Không tư vấn quá sâu khi chưa có thông tin liên hệ.
-- Với khách nhắn tin cần kiểm tra và đọc lại nội dung các tin nhắn trước rồi mới trả lời, nếu khách đã cho số điện thoại rồi thì hỏi lại số điện thoại đó có phải của khách không để gửi thông tin vào số đó
-- Đối với những tin nhắn chưa cho số điện thoại, đọc lại nội dung tin nhắn và nhắn tin hỏi thăm sau mỗi 6 tiếng, liên tục trong hai ngày
+- Luôn kết thúc bằng một câu hỏi tự nhiên.
+
+KỊCH BẢN:
+- Khách hỏi giá quạt: nói có nhiều mức theo mẫu/công suất/phiên bản, tư vấn theo diện tích phòng, không xin số quá sớm.
+- Khách nói phòng 28-30m2: tư vấn dòng khoảng 65W phù hợp.
+- Khách nói muốn xem mẫu và giá: trả lời có thể gửi qua Messenger, hỏi màu/phong cách để lọc mẫu.
+- Khách chê xa: nói có hỗ trợ chi phí đến showroom và hỗ trợ vận chuyển theo chính sách.
+- Khách chê đắt: nói có dòng cơ bản, trung cấp, cao cấp; hỏi ngân sách để lọc mẫu.
+- Khách để lại số: cảm ơn và xác nhận nhân viên sẽ liên hệ.
 
 LỊCH SỬ HỘI THOẠI:
 ${history}
         `
     });
 
-    return response.output_text || "Dạ anh/chị cho em xin số điện thoại/Zalo để bên em tư vấn mẫu phù hợp ạ.";
+    return response.output_text || "Dạ anh/chị cho em xin thêm nhu cầu cụ thể để bên em tư vấn mẫu phù hợp ạ.";
 }
 
 async function sendMessage(senderId, text) {
@@ -135,6 +132,44 @@ async function sendMessage(senderId, text) {
     }
 }
 
+async function handleMessage(event) {
+    if (!event.message || !event.message.text) return;
+    if (event.message.is_echo) return;
+
+    const messageId = event.message.mid;
+    if (processedMessages.has(messageId)) {
+        console.log("Duplicate message ignored:", messageId);
+        return;
+    }
+
+    processedMessages.add(messageId);
+
+    const senderId = event.sender.id;
+    const customerMessage = event.message.text;
+
+    console.log("Customer ID:", senderId);
+    console.log("Customer Message:", customerMessage);
+
+    if (!conversations[senderId]) {
+        conversations[senderId] = [];
+    }
+
+    conversations[senderId].push(`Khách: ${customerMessage}`);
+
+    const history = conversations[senderId].slice(-12).join("\n");
+
+    console.log("Calling OpenAI...");
+
+    const aiReply = await getAIReply(history);
+
+    conversations[senderId].push(`Bot: ${aiReply}`);
+    conversations[senderId] = conversations[senderId].slice(-24);
+
+    console.log("AI Reply:", aiReply);
+
+    await sendMessage(senderId, aiReply);
+}
+
 app.post('/webhook', async (req, res) => {
     console.log("========== WEBHOOK HIT ==========");
     console.log(JSON.stringify(req.body, null, 2));
@@ -142,64 +177,32 @@ app.post('/webhook', async (req, res) => {
     const body = req.body;
 
     if (body.object !== 'page') {
-        res.sendStatus(404);
-        return;
+        return res.sendStatus(404);
     }
+
+    // Trả lời Meta ngay để tránh timeout và gửi lặp
+    res.status(200).send('EVENT_RECEIVED');
 
     for (const entry of body.entry || []) {
         for (const event of entry.messaging || []) {
-            if (!event.message || !event.message.text) {
-                continue;
-            }
-
-            if (event.message.is_echo) {
-                console.log("Ignore echo message");
-                continue;
-            }
-
-            const senderId = event.sender.id;
-            const customerMessage = event.message.text;
-
-            console.log("Customer ID:", senderId);
-            console.log("Customer Message:", customerMessage);
-
             try {
-                if (!conversations[senderId]) {
-                    conversations[senderId] = [];
-                }
-
-                conversations[senderId].push(`Khách: ${customerMessage}`);
-
-                const history = conversations[senderId].slice(-10).join("\n");
-
-                console.log("Calling OpenAI...");
-
-                const aiReply = await getAIReply(history);
-
-                conversations[senderId].push(`Bot: ${aiReply}`);
-
-                // Chỉ giữ tối đa 20 dòng gần nhất để nhẹ server
-                conversations[senderId] = conversations[senderId].slice(-20);
-
-                console.log("AI Reply:", aiReply);
-
-                await sendMessage(senderId, aiReply);
+                await handleMessage(event);
             } catch (error) {
                 console.error("Error:", error);
 
                 try {
-                    await sendMessage(
-                        senderId,
-                        "Dạ hiện hệ thống tư vấn tự động đang bận một chút. Anh/chị để lại số điện thoại/Zalo, bên em gọi tư vấn trực tiếp ạ."
-                    );
+                    if (event.sender && event.sender.id) {
+                        await sendMessage(
+                            event.sender.id,
+                            "Dạ hiện hệ thống tư vấn tự động đang bận một chút. Anh/chị nhắn lại sản phẩm cần xem, bên em hỗ trợ ngay ạ."
+                        );
+                    }
                 } catch (sendError) {
                     console.error("Fallback send error:", sendError);
                 }
             }
         }
     }
-
-    res.status(200).send('EVENT_RECEIVED');
 });
 
 const PORT = process.env.PORT || 10000;
