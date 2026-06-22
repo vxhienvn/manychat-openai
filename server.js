@@ -75,7 +75,7 @@ function detectProductType(customerMessage, historyText) {
     if (bathWords.some(word => msg.includes(word))) return "combo";
     if (fanWords.some(word => msg.includes(word))) return "fan";
 
-    const askImageWords = ["gửi ảnh","xem", "gui anh", "xem mẫu", "xem mau", "cho xem", "gửi mẫu", "gui mau", "mẫu", "mau", "ảnh"];
+    const askImageWords = ["gửi ảnh","xem", "xin ảnh", "xin anh", "gui anh", "xem mẫu", "xem mau", "cho xem", "gửi mẫu", "gui mau", "mẫu", "mau", "ảnh"];
     const isAskingImage = askImageWords.some(word => msg.includes(word));
 
     if (isAskingImage) {
