@@ -1145,18 +1145,17 @@ function dashboardGetViewValue(req, mode) {
 }
 
 const ACTIVE_AD_NAMES = {
-    "120245962675930301": "Quảng cáo Lượt tương tác mới",
-    "120246120500220301": "Sen sôi cao cấp",
-    "120246124254580301": "Quảng cáo Lượt tương tác mới",
+    "120246124254580301": "Giải pháp nội thất + xả kho",
+    "120246119912860301": "Phòng tắm - sen vòi",
+    "120246120500220301": "Sen vòi cao cấp",
+    "120245962675930301": "Tủ - chậu - lavabo",
     "120246120761840301": "Phòng tắm - bồn tắm cao cấp",
     "120246073187320301": "Bồn tắm",
-    "120246119512860301": "Phòng tắm - sen sôi",
     "120246073187330301": "TBVS01",
     "120245910422410301": "Cửa Hàng 2",
     "120245911596200301": "Cửa hàng",
     "120245787797740301": "GUKA - Tổng hợp",
-    "120245792695640301": "TBVS02",
-    "1202457926955640301": "TBVS02"
+    "120245792695640301": "TBVS02"
 };
 
 const ACTIVE_AD_IDS = Object.keys(ACTIVE_AD_NAMES);
@@ -1207,7 +1206,6 @@ function dashboardBuildActiveAdsStats(report) {
     }
 
     return Object.values(map)
-        .filter(x => x.total > 0)
         .sort((a, b) => b.hasPhone - a.hasPhone || b.total - a.total);
 }
 
@@ -1290,7 +1288,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Dashboard Pancake - Ánh Dương</title>
     <style>
-        body { margin: 0; font-family: Arial, sans-serif; background: #f8fafc; color: #111827; }
+        body { margin: 0; font-family: "Times New Roman", Times, serif; font-size: 14px; background: #f8fafc; color: #111827; }
         .wrap { max-width: 1280px; margin: 0 auto; padding: 18px; }
         .header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 16px; }
         .header h1 { margin: 0; font-size: 26px; }
@@ -1298,9 +1296,9 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
         .btns a { display: inline-block; margin-left: 8px; padding: 10px 12px; border-radius: 10px; background: #2563eb; color: white; text-decoration: none; font-size: 14px; }
         .btns a.red { background: #ef4444; }
         .btns a.green { background: #16a34a; }
-        .filters { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; background: #ffffff; padding: 14px; border-radius: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); margin-bottom: 14px; border: 1px solid #e2e8f0; }
-        .filter label { display:block; font-size: 12px; color: #64748b; margin-bottom: 5px; }
-        .filter select, .filter input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 14px; background: #f8fafc; }
+        .filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; background: #ffffff; padding: 14px; border-radius: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); margin-bottom: 14px; border: 1px solid #e2e8f0; }
+        .filter label { display:block; font-size: 13px; color: #64748b; margin-bottom: 5px; }
+        .filter select, .filter input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 14px; background: #f8fafc; font-family: "Times New Roman", Times, serif; }
         .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
         .card { background: #ffffff; border-radius: 16px; padding: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); border: 1px solid #e2e8f0; }
         .card.blue { background: #eff6ff; border-color: #bfdbfe; }
@@ -1315,9 +1313,9 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
         .section h2 { margin: 0 0 10px; font-size: 20px; }
         .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); border: 1px solid #e2e8f0; }
         table { width: 100%; border-collapse: collapse; background: white; min-width: 900px; }
-        th, td { padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; font-size: 14px; }
+        th, td { padding: 11px 12px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; font-size: 14px; line-height: 1.35; }
         th { background: #e0f2fe; color: #0f172a; font-weight: 800; position: sticky; top: 0; }
-        td span { color: #64748b; font-size: 12px; }
+        td span { color: #64748b; font-size: 13px; }
         tbody tr:nth-child(even) { background: #f8fafc; }
         .row-good { background: #dcfce7 !important; }
         .row-mid { background: #fef9c3 !important; }
@@ -1399,6 +1397,13 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
                 </select>
             </div>
             <div class="filter">
+                <label>Bảng quảng cáo</label>
+                <select id="adsTableSelect" onchange="toggleAdsTable()">
+                    <option value="show">Hiện bảng QC</option>
+                    <option value="hide">Ẩn bảng QC</option>
+                </select>
+            </div>
+            <div class="filter">
                 <label>Thao tác</label>
                 <select onchange="if(this.value) window.location.href=this.value">
                     <option value="">Mở nhanh...</option>
@@ -1409,7 +1414,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
             </div>
         </div>
 
-        <div class="notice">Phần <b>Hiệu quả theo quảng cáo</b> chỉ thống kê các quảng cáo đang hoạt động đã khai báo trong hệ thống, không tính quảng cáo cũ đã tắt.</div>
+        <div class="notice">Phần <b>Hiệu quả theo quảng cáo</b> luôn hiển thị đủ 11 quảng cáo đang hoạt động đã khai báo trong hệ thống, kể cả quảng cáo chưa có tin nhắn.</div>
 
         <div class="grid">
             <div class="card blue"><div class="label">Tổng hội thoại</div><div class="num">${stats.total}</div></div>
@@ -1474,6 +1479,13 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
         </div>
     </div>
 <script>
+function toggleAdsTable() {
+    const select = document.getElementById('adsTableSelect');
+    const section = document.getElementById('ads');
+    if (!select || !section) return;
+    section.style.display = select.value === 'hide' ? 'none' : 'block';
+}
+
 function applyDashboardFilters() {
     const limit = document.getElementById('limitSelect').value;
     const view = document.getElementById('viewSelect').value;
