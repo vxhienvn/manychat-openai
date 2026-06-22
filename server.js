@@ -1233,55 +1233,19 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
     const currentView = dashboardGetViewValue(req, mode);
     const currentDate = req.query.date || dashboardTodayKeyVN(0);
 
-    const adsTotals = adsStats.reduce((acc, x) => {
-        acc.total += x.total;
-        acc.hasPhone += x.hasPhone;
-        acc.noPhone += x.noPhone;
-        acc.zalo += x.zalo;
-        acc.called += x.called;
-        acc.hotNoPhone += x.hotNoPhone;
-        return acc;
-    }, { total: 0, hasPhone: 0, noPhone: 0, zalo: 0, called: 0, hotNoPhone: 0 });
-
-    const adsRows = adsStats.map((x, index) => {
-        const adId = String(x.adId || x.ad_id || x.id || "");
-        const adName = String(
-            ACTIVE_AD_NAMES[adId] ||
-            x.name ||
-            x.adName ||
-            x.ad_name ||
-            (adId ? `QC chưa đặt tên ${adId}` : "Không rõ quảng cáo")
-        );
-
-        return `
+    const adsRows = adsStats.map((x, index) => `
         <tr class="${dashboardAdRowClass(x)}">
-            <td class="rank-cell">${index + 1}</td>
-            <td class="ad-cell" style="display:table-cell !important; min-width:320px !important; width:320px !important; text-align:left !important; color:#0f172a !important;">
-                <strong style="display:block !important; color:#0f172a !important; font-size:18px !important; font-weight:800 !important; line-height:1.3 !important;">${dashboardEscapeHtml(adName)}</strong>
-                <small style="display:block !important; color:#94a3b8 !important; font-size:12px !important; font-weight:500 !important; margin-top:4px !important; letter-spacing:.1px !important;">${dashboardEscapeHtml(adId)}</small>
-            </td>
-            <td class="num-cell"><b>${x.total}</b></td>
-            <td class="num-cell"><b>${x.hasPhone}</b><br><span class="rate-pill ${dashboardAdRowClass(x).replace('row-', 'pill-')}">${dashboardRate(x.hasPhone, x.total)}%</span></td>
-            <td class="num-cell">${x.noPhone}<br><span>${dashboardRate(x.noPhone, x.total)}%</span></td>
-            <td class="num-cell"><b>${x.zalo}</b><br><span>${dashboardRate(x.zalo, x.total)}%</span></td>
-            <td class="num-cell">${x.called}</td>
-            <td class="num-cell">${x.hotNoPhone}</td>
+            <td>${index + 1}</td>
+            <td><b>${dashboardEscapeHtml(x.name)}</b><br><span>${dashboardEscapeHtml(x.adId)}</span></td>
+            <td><b>${x.total}</b></td>
+            <td><b>${x.hasPhone}</b><br><span>${dashboardRate(x.hasPhone, x.total)}%</span></td>
+            <td>${x.noPhone}</td>
+            <td><b>${x.zalo}</b><br><span>${dashboardRate(x.zalo, x.total)}%</span></td>
+            <td>${x.called}</td>
+            <td>${x.hotNoPhone}</td>
             <td>${dashboardEscapeHtml(dashboardProductSummary(x.productCount))}</td>
-        </tr>`;
-    }).join("");
-
-    const adsTotalRow = adsStats.length ? `
-        <tr class="total-row">
-            <td colspan="2">TỔNG CỘNG</td>
-            <td>${adsTotals.total}</td>
-            <td>${adsTotals.hasPhone}<br><span>${dashboardRate(adsTotals.hasPhone, adsTotals.total)}%</span></td>
-            <td>${adsTotals.noPhone}<br><span>${dashboardRate(adsTotals.noPhone, adsTotals.total)}%</span></td>
-            <td>${adsTotals.zalo}<br><span>${dashboardRate(adsTotals.zalo, adsTotals.total)}%</span></td>
-            <td>${adsTotals.called}</td>
-            <td>${adsTotals.hotNoPhone}</td>
-            <td></td>
         </tr>
-    ` : "";
+    `).join("");
 
     const hotRows = stats.hotNoPhone.slice(0, 50).map((x, index) => `
         <tr class="row-hot">
@@ -1326,84 +1290,57 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Dashboard Pancake - Ánh Dương</title>
     <style>
-        :root {
-            --bg: #f6f8fc;
-            --text: #111827;
-            --muted: #667085;
-            --line: #e6eaf2;
-            --blue: #2563eb;
-            --green: #16a34a;
-            --orange: #f97316;
-            --red: #ef4444;
-            --purple: #7c3aed;
-        }
-        * { box-sizing: border-box; }
-        body { margin: 0; font-family: Arial, sans-serif; background: var(--bg); color: var(--text); }
-        .wrap { max-width: 1320px; margin: 0 auto; padding: 18px; }
-        .header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }
-        .header h1 { margin: 0; font-size: 26px; color: #0f172a; letter-spacing: -0.3px; }
-        .header p { margin: 7px 0 0; color: var(--muted); line-height: 1.45; }
-        .btns { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
-        .btns a { display: inline-block; padding: 10px 14px; border-radius: 10px; background: #2563eb; color: white; text-decoration: none; font-size: 14px; box-shadow: 0 1px 2px rgba(37,99,235,.2); }
+        body { margin: 0; font-family: Arial, sans-serif; background: #f8fafc; color: #111827; }
+        .wrap { max-width: 1280px; margin: 0 auto; padding: 18px; }
+        .header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 16px; }
+        .header h1 { margin: 0; font-size: 26px; }
+        .header p { margin: 6px 0 0; color: #64748b; }
+        .btns a { display: inline-block; margin-left: 8px; padding: 10px 12px; border-radius: 10px; background: #2563eb; color: white; text-decoration: none; font-size: 14px; }
         .btns a.red { background: #ef4444; }
         .btns a.green { background: #16a34a; }
-        .filters { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; background: #ffffff; padding: 14px; border-radius: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); margin-bottom: 14px; border: 1px solid var(--line); }
-        .filter label { display:block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
-        .filter select, .filter input { width: 100%; padding: 11px; border-radius: 10px; border: 1px solid #d7deea; font-size: 14px; background: #ffffff; color: #111827; }
+        .filters { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; background: #ffffff; padding: 14px; border-radius: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); margin-bottom: 14px; border: 1px solid #e2e8f0; }
+        .filter label { display:block; font-size: 12px; color: #64748b; margin-bottom: 5px; }
+        .filter select, .filter input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #cbd5e1; font-size: 14px; background: #f8fafc; }
         .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
-        .card { border-radius: 14px; padding: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); border: 1px solid var(--line); background:#ffffff; }
-        .card.blue { background: linear-gradient(135deg, #eff6ff, #ffffff); border-color: #bfdbfe; }
-        .card.green { background: linear-gradient(135deg, #ecfdf5, #ffffff); border-color: #bbf7d0; }
-        .card.red { background: linear-gradient(135deg, #fff1f2, #ffffff); border-color: #fecdd3; }
-        .card.orange { background: linear-gradient(135deg, #fff7ed, #ffffff); border-color: #fed7aa; }
-        .card.pink { background: linear-gradient(135deg, #fdf2f8, #ffffff); border-color: #fbcfe8; }
-        .card.gray { background: linear-gradient(135deg, #f8fafc, #ffffff); border-color: #cbd5e1; }
+        .card { background: #ffffff; border-radius: 16px; padding: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); border: 1px solid #e2e8f0; }
+        .card.blue { background: #eff6ff; border-color: #bfdbfe; }
+        .card.green { background: #ecfdf5; border-color: #bbf7d0; }
+        .card.red { background: #fef2f2; border-color: #fecaca; }
+        .card.orange { background: #fff7ed; border-color: #fed7aa; }
+        .card.pink { background: #fdf2f8; border-color: #fbcfe8; }
+        .card.gray { background: #f8fafc; border-color: #cbd5e1; }
         .card .label { color: #475569; font-size: 14px; }
         .card .num { margin-top: 8px; font-size: 30px; font-weight: 800; color: #0f172a; }
         .section { margin-top: 16px; }
-        .section h2 { margin: 0 0 10px; font-size: 20px; color:#0f172a; }
-        .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.06); border: 1px solid var(--line); background:#fff; }
-        table { width: 100%; border-collapse: separate; border-spacing: 0; background: white; min-width: 980px; }
-        th, td { padding: 13px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 16px; color:#1f2937; }
-        th { background: #f8fbff; color: #1e3a8a; font-weight: 800; position: sticky; top: 0; z-index:1; }
-        thead th:first-child { border-top-left-radius: 16px; }
-        thead th:last-child { border-top-right-radius: 16px; }
-        td span { color: #667085; font-size: 12px; }
-        tbody tr:nth-child(even):not(.total-row) { background: #fbfdff; }
-        tbody tr:hover:not(.total-row) { background: #f1f5f9; }
-        .row-good { background: #f1fbf4 !important; }
-        .row-mid { background: #fffbeb !important; }
-        .row-low { background: #fff1f2 !important; }
-        .row-hot { background: #fff7ed !important; }
-        .row-phone { background: #f0fdf4 !important; }
-        .row-normal { background: #ffffff; }
-        .rank-cell { width: 42px; text-align:center; color:#475569; }
-        .num-cell { text-align:center; white-space:nowrap; }
-        .ad-cell { min-width: 320px; width: 320px; }
-        .ad-name { font-size: 18px; font-weight: 800; color:#111827; line-height:1.25; }
-        .ad-id { margin-top: 3px; font-size: 12px; color:#9ca3af; font-weight: 500; letter-spacing:.1px; }
-        .rate-pill { display:inline-block; margin-top:4px; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; }
-        .pill-good { color:#15803d; background:#dcfce7; }
-        .pill-mid { color:#a16207; background:#fef3c7; }
-        .pill-low { color:#be123c; background:#ffe4e6; }
-        .total-row { background:#eef4ff !important; color:#1e3a8a; font-weight:800; }
-        .total-row td { color:#1e3a8a; font-weight:800; }
+        .section h2 { margin: 0 0 10px; font-size: 20px; }
+        .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: 0 1px 4px rgba(15,23,42,.08); border: 1px solid #e2e8f0; }
+        table { width: 100%; border-collapse: collapse; background: white; min-width: 900px; }
+        th, td { padding: 12px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; font-size: 14px; }
+        th { background: #e0f2fe; color: #0f172a; font-weight: 800; position: sticky; top: 0; }
+        td span { color: #64748b; font-size: 12px; }
+        tbody tr:nth-child(even) { background: #f8fafc; }
+        .row-good { background: #dcfce7 !important; }
+        .row-mid { background: #fef9c3 !important; }
+        .row-low { background: #ffe4e6 !important; }
+        .row-hot { background: #ffedd5 !important; }
+        .row-phone { background: #ecfdf5 !important; }
+        .row-normal { background: #f8fafc; }
         .products { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; }
-        .product { background: #ffffff; border-radius: 14px; padding: 13px; box-shadow: 0 2px 8px rgba(15,23,42,.05); border: 1px solid var(--line); color:#334155; }
+        .product { background: #ffffff; border-radius: 14px; padding: 13px; box-shadow: 0 1px 4px rgba(15,23,42,.08); border: 1px solid #e2e8f0; }
         .product:nth-child(1) { background:#eff6ff; }
         .product:nth-child(2) { background:#ecfdf5; }
         .product:nth-child(3) { background:#fdf2f8; }
         .product:nth-child(4) { background:#fff7ed; }
         .product:nth-child(5) { background:#f5f3ff; }
         .product:nth-child(6) { background:#f1f5f9; }
-        .product b { display:block; font-size: 22px; margin-top: 6px; color:#0f172a; }
+        .product b { display:block; font-size: 22px; margin-top: 6px; }
         .notice { background: #fff7ed; border: 1px solid #fed7aa; padding: 12px; border-radius: 12px; margin-top: 12px; color: #9a3412; }
-        .legend { display:flex; flex-wrap:wrap; gap:8px; margin: 8px 0 10px; color:#475569; font-size:13px; justify-content:flex-end; }
-        .chip { padding:6px 10px; border-radius:999px; border:1px solid var(--line); background:white; }
-        .chip.good { background:#dcfce7; color:#166534; }
-        .chip.mid { background:#fef3c7; color:#92400e; }
-        .chip.low { background:#ffe4e6; color:#be123c; }
-        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .products { grid-template-columns: repeat(2, 1fr); } .filters { grid-template-columns: repeat(1, 1fr); } .header { display: block; } .btns { justify-content:flex-start; margin-top: 12px; } th, td { font-size: 14px; padding: 10px; } .ad-cell { min-width:260px !important; width:260px !important; } .ad-name { font-size:16px !important; } .ad-id { font-size:11px !important; } }
+        .legend { display:flex; flex-wrap:wrap; gap:8px; margin: 8px 0 10px; color:#475569; font-size:13px; }
+        .chip { padding:6px 10px; border-radius:999px; border:1px solid #e2e8f0; background:white; }
+        .chip.good { background:#dcfce7; }
+        .chip.mid { background:#fef9c3; }
+        .chip.low { background:#ffe4e6; }
+        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .products { grid-template-columns: repeat(2, 1fr); } .filters { grid-template-columns: repeat(1, 1fr); } .header { display: block; } .btns { margin-top: 12px; } .btns a { margin: 4px 4px 0 0; } th, td { font-size: 12px; padding: 9px; } }
     </style>
 </head>
 <body>
@@ -1495,7 +1432,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
             <div class="table-wrap">
                 <table>
                     <thead><tr><th>#</th><th>Quảng cáo</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng chưa số</th><th>Sản phẩm chính</th></tr></thead>
-                    <tbody>${adsRows ? adsRows + adsTotalRow : `<tr><td colspan="9">Chưa có dữ liệu từ các quảng cáo đang hoạt động</td></tr>`}</tbody>
+                    <tbody>${adsRows || `<tr><td colspan="9">Chưa có dữ liệu từ các quảng cáo đang hoạt động</td></tr>`}</tbody>
                 </table>
             </div>
         </div>
