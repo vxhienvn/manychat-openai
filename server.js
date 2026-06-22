@@ -807,26 +807,70 @@ async function pancakeFetchConversations(limit) {
         throw new Error("Thiếu PANCAKE_PAGE_ID hoặc PANCAKE_PAGE_ACCESS_TOKEN trong Render Environment");
     }
 
-    const pageSize = Math.min(Math.max(Number(limit) || 100, 1), 200);
+    // Pancake endpoint conversations thường trả tối đa khoảng 60 hội thoại/lần.
+    // Muốn lấy 200-500 hội thoại thì phải gọi nhiều lần bằng last_conversation_id.
+    const targetLimit = Math.min(Math.max(Number(limit) || 300, 1), 500);
+    const allConversations = [];
+    const seenIds = new Set();
 
-    const url =
-        `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations` +
-        `?page_access_token=${encodeURIComponent(PANCAKE_PAGE_ACCESS_TOKEN)}` +
-        `&page_number=1&page_size=${pageSize}`;
+    let lastConversationId = null;
+    let safetyCounter = 0;
 
-    const response = await fetch(url);
-    const data = await response.json();
+    while (allConversations.length < targetLimit && safetyCounter < 10) {
+        safetyCounter++;
 
-    if (!data.success) {
-        throw new Error(`Pancake API lỗi: ${JSON.stringify(data)}`);
+        let url =
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations` +
+            `?page_access_token=${encodeURIComponent(PANCAKE_PAGE_ACCESS_TOKEN)}`;
+
+        if (lastConversationId) {
+            url += `&last_conversation_id=${encodeURIComponent(lastConversationId)}`;
+        }
+
+        const response = await fetch(url);
+        const data = await response.json();
+
+        if (!data.success) {
+            throw new Error(`Pancake API lỗi: ${JSON.stringify(data)}`);
+        }
+
+        const batch = Array.isArray(data.conversations) ? data.conversations : [];
+
+        if (batch.length === 0) {
+            break;
+        }
+
+        for (const conv of batch) {
+            if (!conv || !conv.id) continue;
+            if (seenIds.has(conv.id)) continue;
+
+            seenIds.add(conv.id);
+            allConversations.push(conv);
+
+            if (allConversations.length >= targetLimit) {
+                break;
+            }
+        }
+
+        const lastItem = batch[batch.length - 1];
+        if (!lastItem || !lastItem.id || lastItem.id === lastConversationId) {
+            break;
+        }
+
+        lastConversationId = lastItem.id;
+
+        // Nếu Pancake trả ít hơn 60 hội thoại thì thường là đã hết dữ liệu tiếp theo.
+        if (batch.length < 60) {
+            break;
+        }
     }
 
-    return data.conversations || [];
+    return allConversations.slice(0, targetLimit);
 }
 
 app.get('/pancake-report', async (req, res) => {
     try {
-        const limit = req.query.limit || 100;
+        const limit = req.query.limit || 300;
         const conversations = await pancakeFetchConversations(limit);
         const report = conversations.map(pancakeBuildCustomerRow);
 
@@ -869,7 +913,7 @@ app.get('/pancake-report', async (req, res) => {
 
 app.get('/pancake-report-text', async (req, res) => {
     try {
-        const limit = req.query.limit || 100;
+        const limit = req.query.limit || 300;
         const conversations = await pancakeFetchConversations(limit);
         const report = conversations.map(pancakeBuildCustomerRow);
 
