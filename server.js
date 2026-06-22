@@ -1155,8 +1155,7 @@ const ACTIVE_AD_NAMES = {
     "120245910422410301": "Cửa Hàng 2",
     "120245911596200301": "Cửa hàng",
     "120245787797740301": "GUKA - Tổng hợp",
-    "120245792695640301": "TBVS02",
-    "1202457926955640301": "TBVS02"
+    "120245792695640301": "TBVS02"
 };
 
 const ACTIVE_AD_IDS = Object.keys(ACTIVE_AD_NAMES);
@@ -1206,9 +1205,14 @@ function dashboardBuildActiveAdsStats(report) {
         }
     }
 
+    // Luôn hiển thị đủ các quảng cáo đang hoạt động đã khai báo, kể cả hôm nay chưa có hội thoại.
+    // Như vậy dashboard theo ngày sẽ thấy QC nào đang bật nhưng chưa ra khách.
     return Object.values(map)
-        .filter(x => x.total > 0)
-        .sort((a, b) => b.hasPhone - a.hasPhone || b.total - a.total);
+        .sort((a, b) => {
+            // QC có dữ liệu đứng trước; QC chưa có dữ liệu vẫn hiện ở dưới.
+            if (b.total !== a.total) return b.hasPhone - a.hasPhone || b.total - a.total;
+            return String(a.name).localeCompare(String(b.name), 'vi');
+        });
 }
 
 function dashboardProductSummary(productCount) {
