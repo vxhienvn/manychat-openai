@@ -11,6 +11,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 const HISTORY_FILE = path.join(__dirname, 'conversations.json');
+const STATE_FILE = path.join(__dirname, 'customer_states.json');
 
 function loadConversations() {
     try {
@@ -31,11 +32,150 @@ function saveConversations(conversations) {
     }
 }
 
+function loadCustomerStates() {
+    try {
+        if (fs.existsSync(STATE_FILE)) {
+            return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        }
+    } catch (error) {
+        console.error("Load customer states error:", error);
+    }
+    return {};
+}
+
+function saveCustomerStates(customerStates) {
+    try {
+        fs.writeFileSync(STATE_FILE, JSON.stringify(customerStates, null, 2));
+    } catch (error) {
+        console.error("Save customer states error:", error);
+    }
+}
+
+function ensureCustomerState(senderId) {
+    if (!customerStates[senderId]) {
+        customerStates[senderId] = {
+            productType: null,
+            lastCustomerTime: null,
+            hasContact: false,
+            followUp8hSent: false,
+            lastFollowUpTime: null
+        };
+    }
+
+    return customerStates[senderId];
+}
+
+function hasPhoneOrContact(text) {
+    if (!text) return false;
+
+    const normalized = text.toLowerCase();
+
+    // Bắt số điện thoại Việt Nam: 0xxxxxxxxx hoặc +84xxxxxxxxx, có thể có dấu cách/chấm/gạch
+    const phoneRegex = /(?:\+84|0)[0-9\s.-]{8,12}/;
+    if (phoneRegex.test(normalized)) return true;
+
+    if (
+        normalized.includes("số của em") ||
+        normalized.includes("sdt của em") ||
+        normalized.includes("số điện thoại của em") ||
+        normalized.includes("zalo của em") ||
+        normalized.includes("đã cho số") ||
+        normalized.includes("đã để lại số")
+    ) {
+        return true;
+    }
+
+    return false;
+}
+
+function buildFollowUpMessage(productType) {
+    if (productType === "fan") {
+        return "Dạ em nhắn lại về mẫu quạt anh xem lúc trước ạ. Bên em còn nhiều mẫu quạt phù hợp theo diện tích phòng và ngân sách khác nhau. Anh muốn em lọc thêm mẫu theo phòng bao nhiêu m2 để gửi đúng hơn không ạ?";
+    }
+
+    if (productType === "faucet") {
+        return "Dạ em nhắn lại về nhóm sen vòi, lavabo, chậu rửa anh xem lúc trước ạ. Bên em còn nhiều mẫu phối đồng bộ cho phòng tắm. Anh muốn xem thêm dòng cơ bản hay dòng đẹp hơn một chút ạ?";
+    }
+
+    if (productType === "combo") {
+        return "Dạ em nhắn lại về mẫu thiết bị vệ sinh/phòng tắm anh xem lúc trước ạ. Bên em có combo cơ bản, trung cấp và cao cấp, có thể phối theo ngân sách. Anh muốn em gửi thêm nhóm mẫu tầm bao nhiêu tiền ạ?";
+    }
+
+    return null;
+}
+
+async function checkFollowUpsOnStart() {
+    console.log("Checking 8h follow-ups...");
+
+    const now = Date.now();
+    const minDelay = 8 * 60 * 60 * 1000;
+    const maxDelay = 23 * 60 * 60 * 1000;
+
+    for (const senderId of Object.keys(conversations)) {
+        try {
+            const history = conversations[senderId];
+
+            if (!Array.isArray(history) || history.length === 0) continue;
+
+            const state = ensureCustomerState(senderId);
+            const historyText = history.join(" ").toLowerCase();
+
+            if (state.hasContact || hasPhoneOrContact(historyText)) {
+                state.hasContact = true;
+                saveCustomerStates(customerStates);
+                continue;
+            }
+
+            if (state.followUp8hSent) continue;
+            if (!state.lastCustomerTime) continue;
+
+            const diff = now - Number(state.lastCustomerTime);
+
+            // Chỉ chăm sóc trong cửa sổ 8h-23h để tránh vượt quá chính sách 24h của Messenger
+            if (diff < minDelay || diff > maxDelay) continue;
+
+            // Tuyệt đối chống nhầm chủ đề: nếu không xác định được chủ đề thì bỏ qua, không gửi đại
+            if (!state.productType) {
+                const detectedFromHistory = detectProductType("", historyText);
+                if (detectedFromHistory) {
+                    state.productType = detectedFromHistory;
+                } else {
+                    console.log("Skip follow-up, unknown product type:", senderId);
+                    continue;
+                }
+            }
+
+            const followText = buildFollowUpMessage(state.productType);
+            if (!followText) {
+                console.log("Skip follow-up, no follow-up message for type:", senderId, state.productType);
+                continue;
+            }
+
+            await sendMessage(senderId, followText);
+
+            history.push(`Bot chăm sóc 8h (${state.productType}): ${followText} | TIME:${now} | PRODUCT:${state.productType}`);
+            conversations[senderId] = history.slice(-60);
+
+            state.followUp8hSent = true;
+            state.lastFollowUpTime = now;
+
+            saveConversations(conversations);
+            saveCustomerStates(customerStates);
+
+            console.log("8h follow-up sent:", senderId, state.productType);
+        } catch (error) {
+            console.error("Follow-up error for sender:", senderId, error);
+        }
+    }
+}
+
+
 const openai = new OpenAI({
     apiKey: OPENAI_API_KEY
 });
 
 const conversations = loadConversations();
+const customerStates = loadCustomerStates();
 const processedMessages = new Set();
 
 app.get('/', (req, res) => {
@@ -57,8 +197,9 @@ app.get('/webhook', (req, res) => {
 });
 
 function detectProductType(customerMessage, historyText) {
-    const msg = customerMessage.toLowerCase();
-    const history = historyText.toLowerCase();
+    const msg = (customerMessage || "").toLowerCase();
+    const history = (historyText || "").toLowerCase();
+    const combined = `${msg} ${history}`;
 
     const faucetWords = [
         "lavabo", "chậu lavabo", "chau lavabo",
@@ -75,9 +216,11 @@ function detectProductType(customerMessage, historyText) {
 
     const fanWords = [
         "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
-        "5 cánh", "8 cánh", "10 cánh", "55w", "65w", "70w", "90w", "cho xem quạt", "xem quạt", "gửi quạt", "gui quat", "xin quạt", "xin quat"
+        "5 cánh", "8 cánh", "10 cánh", "55w", "65w", "70w", "90w",
+        "cho xem quạt", "xem quạt", "gửi quạt", "gui quat", "xin quạt", "xin quat"
     ];
 
+    // Ưu tiên tin nhắn mới trước để khách đổi chủ đề vẫn đúng
     if (faucetWords.some(word => msg.includes(word))) return "faucet";
     if (bathWords.some(word => msg.includes(word))) return "combo";
     if (fanWords.some(word => msg.includes(word))) return "fan";
@@ -91,11 +234,15 @@ function detectProductType(customerMessage, historyText) {
 
     const isAskingImage = askImageWords.some(word => msg.includes(word));
 
-    if (isAskingImage) {
+    if (isAskingImage || !msg.trim()) {
         if (faucetWords.some(word => history.includes(word))) return "faucet";
         if (bathWords.some(word => history.includes(word))) return "combo";
         if (fanWords.some(word => history.includes(word))) return "fan";
     }
+
+    if (faucetWords.some(word => combined.includes(word))) return "faucet";
+    if (bathWords.some(word => combined.includes(word))) return "combo";
+    if (fanWords.some(word => combined.includes(word))) return "fan";
 
     return null;
 }
@@ -103,13 +250,14 @@ function detectProductType(customerMessage, historyText) {
 function shouldSendCarousel(customerMessage) {
     const msg = customerMessage.toLowerCase();
 
+    // Không dùng từ đơn "ảnh" hoặc "anh", vì "anh" sẽ làm bot gửi slide nhầm ở hầu hết hội thoại.
     const words = [
         "gửi ảnh", "gui anh",
         "xin ảnh", "xin anh",
         "xem ảnh", "xem anh",
         "cho ảnh", "cho anh",
         "xem mẫu", "xem mau",
-        "cho xem", "gửi mẫu", "gui mau", "gửi ảnh", "gui anh", "ảnh", "anh",
+        "cho xem", "gửi mẫu", "gui mau",
         "xin mẫu", "xin mau",
         "cho mẫu", "cho mau"
     ];
@@ -419,6 +567,7 @@ async function handleMessage(event) {
 
     const senderId = event.sender.id;
     const customerMessage = event.message.text;
+    const now = Date.now();
 
     console.log("Customer ID:", senderId);
     console.log("Customer Message:", customerMessage);
@@ -427,25 +576,44 @@ async function handleMessage(event) {
         conversations[senderId] = [];
     }
 
-    conversations[senderId].push(`Khách: ${customerMessage}`);
+    const state = ensureCustomerState(senderId);
+    const currentHistoryText = conversations[senderId].slice(-30).join(" ");
+    const detectedType = detectProductType(customerMessage, currentHistoryText);
+
+    if (detectedType) {
+        state.productType = detectedType;
+    }
+
+    state.lastCustomerTime = now;
+    state.followUp8hSent = false;
+
+    if (hasPhoneOrContact(customerMessage)) {
+        state.hasContact = true;
+    }
+
+    conversations[senderId].push(`Khách: ${customerMessage} | TIME:${now} | PRODUCT:${state.productType || "unknown"}`);
     conversations[senderId] = conversations[senderId].slice(-60);
+
     saveConversations(conversations);
+    saveCustomerStates(customerStates);
 
     const history = conversations[senderId].slice(-30).join("\n");
 
     console.log("Calling OpenAI...");
     const aiReply = await getAIReply(history);
 
-    conversations[senderId].push(`Bot: ${aiReply}`);
+    conversations[senderId].push(`Bot: ${aiReply} | TIME:${Date.now()} | PRODUCT:${state.productType || "unknown"}`);
     conversations[senderId] = conversations[senderId].slice(-60);
+
     saveConversations(conversations);
+    saveCustomerStates(customerStates);
 
     console.log("AI Reply:", aiReply);
     await sendMessage(senderId, aiReply);
 
     if (shouldSendCarousel(customerMessage)) {
         const updatedHistory = conversations[senderId].slice(-30).join(" ");
-        const productType = detectProductType(customerMessage, updatedHistory);
+        const productType = detectProductType(customerMessage, updatedHistory) || state.productType;
 
         if (productType === "combo") {
             await sendComboCarousel(senderId);
@@ -453,6 +621,8 @@ async function handleMessage(event) {
             await sendFanCarousel(senderId);
         } else if (productType === "faucet") {
             await sendFaucetCarousel(senderId);
+        } else {
+            console.log("Carousel skipped, unknown product type:", senderId, customerMessage);
         }
     }
 }
@@ -494,4 +664,14 @@ const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, () => {
     console.log(`Server running on ${PORT}`);
+
+    // Khi máy chủ online lại, rà khách im 8-23 tiếng, chưa có số điện thoại/Zalo và chăm sóc đúng chủ đề
+    setTimeout(() => {
+        checkFollowUpsOnStart().catch(console.error);
+    }, 5000);
+
+    // Khi server còn online, kiểm tra lại mỗi 60 phút
+    setInterval(() => {
+        checkFollowUpsOnStart().catch(console.error);
+    }, 60 * 60 * 1000);
 });
