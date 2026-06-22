@@ -58,7 +58,8 @@ function ensureCustomerState(senderId) {
             lastCustomerTime: null,
             hasContact: false,
             followUp8hSent: false,
-            lastFollowUpTime: null
+            lastFollowUpTime: null,
+            lastCarouselTime: null
         };
     }
 
@@ -79,8 +80,19 @@ function hasPhoneOrContact(text) {
         normalized.includes("sdt của em") ||
         normalized.includes("số điện thoại của em") ||
         normalized.includes("zalo của em") ||
+        normalized.includes("zalo em") ||
+        normalized.includes("zalo anh") ||
+        normalized.includes("zalo chị") ||
+        normalized.includes("gọi em") ||
+        normalized.includes("goi em") ||
+        normalized.includes("gọi anh") ||
+        normalized.includes("goi anh") ||
+        normalized.includes("liên hệ em") ||
+        normalized.includes("lien he em") ||
         normalized.includes("đã cho số") ||
-        normalized.includes("đã để lại số")
+        normalized.includes("đã để lại số") ||
+        normalized.includes("để lại số") ||
+        normalized.includes("de lai so")
     ) {
         return true;
     }
@@ -612,17 +624,29 @@ async function handleMessage(event) {
     await sendMessage(senderId, aiReply);
 
     if (shouldSendCarousel(customerMessage)) {
-        const updatedHistory = conversations[senderId].slice(-30).join(" ");
-        const productType = detectProductType(customerMessage, updatedHistory) || state.productType;
+        const carouselCooldown = 5 * 60 * 1000;
 
-        if (productType === "combo") {
-            await sendComboCarousel(senderId);
-        } else if (productType === "fan") {
-            await sendFanCarousel(senderId);
-        } else if (productType === "faucet") {
-            await sendFaucetCarousel(senderId);
+        if (state.lastCarouselTime && now - Number(state.lastCarouselTime) < carouselCooldown) {
+            console.log("Carousel skipped, cooldown:", senderId);
         } else {
-            console.log("Carousel skipped, unknown product type:", senderId, customerMessage);
+            const updatedHistory = conversations[senderId].slice(-30).join(" ");
+            const productType = detectProductType(customerMessage, updatedHistory) || state.productType;
+
+            if (productType === "combo") {
+                await sendComboCarousel(senderId);
+                state.lastCarouselTime = Date.now();
+                saveCustomerStates(customerStates);
+            } else if (productType === "fan") {
+                await sendFanCarousel(senderId);
+                state.lastCarouselTime = Date.now();
+                saveCustomerStates(customerStates);
+            } else if (productType === "faucet") {
+                await sendFaucetCarousel(senderId);
+                state.lastCarouselTime = Date.now();
+                saveCustomerStates(customerStates);
+            } else {
+                console.log("Carousel skipped, unknown product type:", senderId, customerMessage);
+            }
         }
     }
 }
@@ -977,7 +1001,7 @@ ${phoneLines.length ? phoneLines.join("\n") : "Không có"}
 
 
 // ===== DASHBOARD MODULE =====
-// Dashboard tổng quan, dashboard hôm nay, hôm qua, theo ngày hoặc theo số giờ gần nhất.
+// Dashboard tổng quan, theo ngày, theo giờ, khách nóng và bộ lọc chọn nhanh trên điện thoại.
 // Link dùng nhanh:
 // /dashboard?limit=500
 // /dashboard-today?limit=500
@@ -998,8 +1022,6 @@ function dashboardEscapeHtml(value = "") {
 function dashboardDateKeyVN(dateInput) {
     const d = new Date(dateInput);
     if (Number.isNaN(d.getTime())) return "";
-
-    // en-CA trả dạng YYYY-MM-DD, dùng múi giờ Việt Nam để lọc đúng ngày làm việc.
     return d.toLocaleDateString("en-CA", { timeZone: "Asia/Ho_Chi_Minh" });
 }
 
@@ -1013,43 +1035,78 @@ function dashboardTodayKeyVN(offsetDays = 0) {
     return `${y}-${m}-${d}`;
 }
 
+function dashboardNormalizeProduct(product = "all") {
+    const value = String(product || "all").toLowerCase();
+    const map = {
+        all: "all",
+        quat: "Quạt",
+        fan: "Quạt",
+        thiet_bi_ve_sinh: "Thiết bị vệ sinh",
+        tbvs: "Thiết bị vệ sinh",
+        combo: "Combo phòng tắm",
+        combo_phong_tam: "Combo phòng tắm",
+        bep: "Bếp",
+        bon_tam: "Bồn tắm",
+        khac: "Khác"
+    };
+    return map[value] || "all";
+}
+
+function dashboardProductParamFromName(name = "all") {
+    const map = {
+        "Quạt": "quat",
+        "Thiết bị vệ sinh": "thiet_bi_ve_sinh",
+        "Combo phòng tắm": "combo",
+        "Bếp": "bep",
+        "Bồn tắm": "bon_tam",
+        "Khác": "khac"
+    };
+    return map[name] || "all";
+}
+
 function dashboardFilterReport(report, req, mode = "all") {
     const dateParam = req.query.date;
     const hoursParam = req.query.hours;
+    let title = "Tổng quan gần nhất";
+    let filtered = report;
 
     if (hoursParam) {
         const hours = Math.min(Math.max(Number(hoursParam) || 24, 1), 168);
         const fromTime = Date.now() - hours * 60 * 60 * 1000;
-        return {
-            title: `${hours} giờ gần nhất`,
-            report: report.filter(x => {
-                const t = new Date(x.updated_at).getTime();
-                return !Number.isNaN(t) && t >= fromTime;
-            })
-        };
+        title = `${hours} giờ gần nhất`;
+        filtered = filtered.filter(x => {
+            const t = new Date(x.updated_at).getTime();
+            return !Number.isNaN(t) && t >= fromTime;
+        });
+    } else {
+        let targetDate = null;
+
+        if (dateParam) {
+            targetDate = String(dateParam).trim();
+        } else if (mode === "today") {
+            targetDate = dashboardTodayKeyVN(0);
+        } else if (mode === "yesterday") {
+            targetDate = dashboardTodayKeyVN(-1);
+        }
+
+        if (targetDate) {
+            title = `Ngày ${targetDate}`;
+            filtered = filtered.filter(x => dashboardDateKeyVN(x.updated_at) === targetDate);
+        }
     }
 
-    let targetDate = null;
-
-    if (dateParam) {
-        targetDate = String(dateParam).trim();
-    } else if (mode === "today") {
-        targetDate = dashboardTodayKeyVN(0);
-    } else if (mode === "yesterday") {
-        targetDate = dashboardTodayKeyVN(-1);
+    const productName = dashboardNormalizeProduct(req.query.product || "all");
+    if (productName !== "all") {
+        title += ` | ${productName}`;
+        filtered = filtered.filter(x => x.product === productName);
     }
 
-    if (targetDate) {
-        return {
-            title: `Ngày ${targetDate}`,
-            report: report.filter(x => dashboardDateKeyVN(x.updated_at) === targetDate)
-        };
+    if (mode === "hot") {
+        title = `Khách nóng chưa có số | ${title}`;
+        filtered = filtered.filter(x => x.hot_lead && !x.has_phone);
     }
 
-    return {
-        title: "Tổng quan gần nhất",
-        report
-    };
+    return { title, report: filtered, productName };
 }
 
 function dashboardBuildStats(report) {
@@ -1074,10 +1131,28 @@ function dashboardBuildStats(report) {
     return { total, hasPhone, noPhone, hotNoPhone, called, zalo, notBuy, phoneRate, productCount };
 }
 
-function dashboardRenderHtml({ title, limit, fullTotal, report }) {
-    const stats = dashboardBuildStats(report);
+function dashboardSelected(value, current) {
+    return String(value) === String(current) ? "selected" : "";
+}
 
-    const hotRows = stats.hotNoPhone.slice(0, 40).map((x, index) => `
+function dashboardGetViewValue(req, mode) {
+    if (mode === "today") return "today";
+    if (mode === "yesterday") return "yesterday";
+    if (mode === "hot") return "hot";
+    if (req.query.hours) return `hours:${req.query.hours}`;
+    if (req.query.date) return "date";
+    return "all";
+}
+
+function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
+    const stats = dashboardBuildStats(report);
+    const currentLimit = String(limit || 500);
+    const currentProduct = dashboardProductParamFromName(dashboardNormalizeProduct(req.query.product || "all"));
+    const currentView = dashboardGetViewValue(req, mode);
+    const currentDate = req.query.date || dashboardTodayKeyVN(0);
+    const currentHours = String(req.query.hours || 24);
+
+    const hotRows = stats.hotNoPhone.slice(0, 50).map((x, index) => `
         <tr>
             <td>${index + 1}</td>
             <td><b>${dashboardEscapeHtml(x.name)}</b><br><span>${dashboardEscapeHtml(x.conversation_id)}</span></td>
@@ -1089,7 +1164,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report }) {
 
     const phoneRows = report
         .filter(x => x.has_phone)
-        .slice(0, 40)
+        .slice(0, 50)
         .map((x, index) => `
             <tr>
                 <td>${index + 1}</td>
@@ -1102,7 +1177,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report }) {
 
     const noPhoneRows = report
         .filter(x => !x.has_phone)
-        .slice(0, 40)
+        .slice(0, 50)
         .map((x, index) => `
             <tr>
                 <td>${index + 1}</td>
@@ -1128,6 +1203,9 @@ function dashboardRenderHtml({ title, limit, fullTotal, report }) {
         .btns a { display: inline-block; margin-left: 8px; padding: 10px 12px; border-radius: 10px; background: #111827; color: white; text-decoration: none; font-size: 14px; }
         .btns a.red { background: #dc2626; }
         .btns a.green { background: #16a34a; }
+        .filters { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; background: white; padding: 14px; border-radius: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); margin-bottom: 14px; }
+        .filter label { display:block; font-size: 12px; color: #6b7280; margin-bottom: 5px; }
+        .filter select, .filter input { width: 100%; box-sizing: border-box; padding: 10px; border-radius: 10px; border: 1px solid #d1d5db; font-size: 14px; background: white; }
         .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
         .card { background: white; border-radius: 16px; padding: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
         .card .label { color: #6b7280; font-size: 14px; }
@@ -1145,7 +1223,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report }) {
         .product { background: white; border-radius: 14px; padding: 13px; box-shadow: 0 1px 4px rgba(0,0,0,.08); }
         .product b { display:block; font-size: 22px; margin-top: 6px; }
         .notice { background: #fff7ed; border: 1px solid #fed7aa; padding: 12px; border-radius: 12px; margin-top: 12px; color: #9a3412; }
-        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .products { grid-template-columns: repeat(2, 1fr); } .header { display: block; } .btns { margin-top: 12px; } .btns a { margin: 4px 4px 0 0; } th, td { font-size: 12px; padding: 9px; } }
+        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .products { grid-template-columns: repeat(2, 1fr); } .filters { grid-template-columns: repeat(1, 1fr); } .header { display: block; } .btns { margin-top: 12px; } .btns a { margin: 4px 4px 0 0; } th, td { font-size: 12px; padding: 9px; } }
     </style>
 </head>
 <body>
@@ -1156,16 +1234,65 @@ function dashboardRenderHtml({ title, limit, fullTotal, report }) {
                 <p>${dashboardEscapeHtml(title)} | Đã lấy ${fullTotal}/${limit} hội thoại | Đang hiển thị ${stats.total} hội thoại | Cập nhật: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}</p>
             </div>
             <div class="btns">
-                <a class="green" href="/dashboard-today?limit=500">Hôm nay</a>
-                <a href="/dashboard-yesterday?limit=500">Hôm qua</a>
-                <a href="/dashboard?hours=24&limit=500">24 giờ</a>
-                <a href="/dashboard?limit=500">500 gần nhất</a>
-                <a class="red" href="/dashboard-hot?limit=500">Khách nóng</a>
-                <a href="/pancake-report-text?limit=500">Bản text</a>
+                <a class="green" href="/dashboard-today?limit=${currentLimit}">Hôm nay</a>
+                <a href="/dashboard-yesterday?limit=${currentLimit}">Hôm qua</a>
+                <a href="/dashboard?hours=24&limit=${currentLimit}">24 giờ</a>
+                <a href="/dashboard?limit=${currentLimit}">Gần nhất</a>
+                <a class="red" href="/dashboard-hot?limit=${currentLimit}">Khách nóng</a>
+                <a href="/pancake-report-text?limit=${currentLimit}">Bản text</a>
             </div>
         </div>
 
-        <div class="notice">Mẹo: xem ngày cụ thể bằng link dạng <b>/dashboard?date=2026-06-22&limit=500</b>. Dashboard đang lọc theo trường updated_at của Pancake.</div>
+        <div class="filters">
+            <div class="filter">
+                <label>Số hội thoại</label>
+                <select id="limitSelect" onchange="applyDashboardFilters()">
+                    <option value="100" ${dashboardSelected("100", currentLimit)}>100 gần nhất</option>
+                    <option value="200" ${dashboardSelected("200", currentLimit)}>200 gần nhất</option>
+                    <option value="300" ${dashboardSelected("300", currentLimit)}>300 gần nhất</option>
+                    <option value="500" ${dashboardSelected("500", currentLimit)}>500 gần nhất</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label>Chế độ xem</label>
+                <select id="viewSelect" onchange="applyDashboardFilters()">
+                    <option value="all" ${dashboardSelected("all", currentView)}>Tổng quan gần nhất</option>
+                    <option value="today" ${dashboardSelected("today", currentView)}>Hôm nay</option>
+                    <option value="yesterday" ${dashboardSelected("yesterday", currentView)}>Hôm qua</option>
+                    <option value="hours:24" ${dashboardSelected("hours:24", currentView)}>24 giờ gần nhất</option>
+                    <option value="hours:48" ${dashboardSelected("hours:48", currentView)}>48 giờ gần nhất</option>
+                    <option value="hot" ${dashboardSelected("hot", currentView)}>Khách nóng chưa có số</option>
+                    <option value="date" ${dashboardSelected("date", currentView)}>Chọn ngày cụ thể</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label>Ngày cụ thể</label>
+                <input id="dateInput" type="date" value="${dashboardEscapeHtml(currentDate)}" onchange="document.getElementById('viewSelect').value='date'; applyDashboardFilters();" />
+            </div>
+            <div class="filter">
+                <label>Sản phẩm</label>
+                <select id="productSelect" onchange="applyDashboardFilters()">
+                    <option value="all" ${dashboardSelected("all", currentProduct)}>Tất cả</option>
+                    <option value="quat" ${dashboardSelected("quat", currentProduct)}>Quạt</option>
+                    <option value="thiet_bi_ve_sinh" ${dashboardSelected("thiet_bi_ve_sinh", currentProduct)}>Thiết bị vệ sinh</option>
+                    <option value="combo" ${dashboardSelected("combo", currentProduct)}>Combo phòng tắm</option>
+                    <option value="bep" ${dashboardSelected("bep", currentProduct)}>Bếp</option>
+                    <option value="bon_tam" ${dashboardSelected("bon_tam", currentProduct)}>Bồn tắm</option>
+                    <option value="khac" ${dashboardSelected("khac", currentProduct)}>Khác</option>
+                </select>
+            </div>
+            <div class="filter">
+                <label>Thao tác</label>
+                <select onchange="if(this.value) window.location.href=this.value">
+                    <option value="">Mở nhanh...</option>
+                    <option value="/dashboard?limit=${currentLimit}">Dashboard</option>
+                    <option value="/pancake-report-text?limit=${currentLimit}">Bản text</option>
+                    <option value="/pancake-report?limit=${currentLimit}">JSON</option>
+                </select>
+            </div>
+        </div>
+
+        <div class="notice">Bộ lọc dùng trường <b>updated_at</b> của Pancake. Nếu chọn ngày mà dữ liệu ít, hãy tăng số hội thoại lấy gần nhất lên 500.</div>
 
         <div class="grid">
             <div class="card"><div class="label">Tổng hội thoại</div><div class="num">${stats.total}</div></div>
@@ -1214,6 +1341,32 @@ function dashboardRenderHtml({ title, limit, fullTotal, report }) {
             </table>
         </div>
     </div>
+<script>
+function applyDashboardFilters() {
+    const limit = document.getElementById('limitSelect').value;
+    const view = document.getElementById('viewSelect').value;
+    const product = document.getElementById('productSelect').value;
+    const date = document.getElementById('dateInput').value;
+    let path = '/dashboard';
+    const params = new URLSearchParams();
+    params.set('limit', limit);
+    if (product && product !== 'all') params.set('product', product);
+
+    if (view === 'today') {
+        path = '/dashboard-today';
+    } else if (view === 'yesterday') {
+        path = '/dashboard-yesterday';
+    } else if (view === 'hot') {
+        path = '/dashboard-hot';
+    } else if (view && view.startsWith('hours:')) {
+        params.set('hours', view.split(':')[1]);
+    } else if (view === 'date') {
+        if (date) params.set('date', date);
+    }
+
+    window.location.href = path + '?' + params.toString();
+}
+</script>
 </body>
 </html>`;
 }
@@ -1228,7 +1381,9 @@ async function dashboardHandler(req, res, mode = "all") {
             title: filtered.title,
             limit,
             fullTotal: fullReport.length,
-            report: filtered.report
+            report: filtered.report,
+            req,
+            mode
         }));
     } catch (error) {
         console.error("Dashboard error:", error);
@@ -1250,7 +1405,7 @@ app.get('/dashboard-yesterday', async (req, res) => {
 
 app.get('/dashboard-hot', async (req, res) => {
     req.query.hours = req.query.hours || "24";
-    await dashboardHandler(req, res, "all");
+    await dashboardHandler(req, res, "hot");
 });
 
 // ===== END DASHBOARD MODULE =====
