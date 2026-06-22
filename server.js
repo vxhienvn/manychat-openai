@@ -1206,6 +1206,7 @@ function dashboardBuildActiveAdsStats(report) {
     }
 
     return Object.values(map)
+        .filter(x => x.total > 0)
         .sort((a, b) => b.hasPhone - a.hasPhone || b.total - a.total);
 }
 
@@ -1306,7 +1307,20 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode }) {
         `).join("");
 
     const adsSectionHtml = currentAdsDisplay === "hide" ? "" : `
-${adsSectionHtml}
+        <div class="section" id="ads">
+            <h2>📈 Hiệu quả theo quảng cáo đang hoạt động</h2>
+            <div class="legend">
+                <span class="chip good">Xanh: tỷ lệ lấy SĐT ≥ 35%</span>
+                <span class="chip mid">Vàng: 20% - 34.9%</span>
+                <span class="chip low">Hồng: dưới 20%</span>
+            </div>
+            <div class="table-wrap">
+                <table>
+                    <thead><tr><th>#</th><th>Quảng cáo</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng chưa số</th><th>Sản phẩm chính</th></tr></thead>
+                    <tbody>${adsRows ? adsRows + adsTotalRow : `<tr><td colspan="9">Chưa có dữ liệu từ các quảng cáo đang hoạt động</td></tr>`}</tbody>
+                </table>
+            </div>
+        </div>
     `;
 
     return `<!doctype html>
@@ -1328,7 +1342,7 @@ ${adsSectionHtml}
             --purple: #7c3aed;
         }
         * { box-sizing: border-box; }
-        body { margin: 0; font-family: "Times New Roman", Times, serif; background: var(--bg); color: var(--text); font-size:14px; }
+        body { margin: 0; font-family: "Times New Roman", Times, serif; background: var(--bg); color: var(--text); font-size: 14px; }
         .wrap { max-width: 1320px; margin: 0 auto; padding: 18px; }
         .header { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; margin-bottom: 16px; }
         .header h1 { margin: 0; font-size: 28px; color: #0f172a; letter-spacing: -0.3px; }
@@ -1338,7 +1352,7 @@ ${adsSectionHtml}
         .btns a.red { background: #ef4444; }
         .btns a.green { background: #16a34a; }
         .filters { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px; background: #ffffff; padding: 14px; border-radius: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); margin-bottom: 14px; border: 1px solid var(--line); }
-        .filter label { display:block; font-size: 13px; color: var(--muted); margin-bottom: 5px; }
+        .filter label { display:block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
         .filter select, .filter input { width: 100%; padding: 11px; border-radius: 10px; border: 1px solid #d7deea; font-size: 14px; background: #ffffff; color: #111827; }
         .grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
         .card { border-radius: 14px; padding: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.05); border: 1px solid var(--line); background:#ffffff; }
@@ -1351,10 +1365,10 @@ ${adsSectionHtml}
         .card .label { color: #475569; font-size: 14px; }
         .card .num { margin-top: 8px; font-size: 30px; font-weight: 800; color: #0f172a; }
         .section { margin-top: 16px; }
-        .section h2 { margin: 0 0 10px; font-size: 22px; color:#0f172a; }
+        .section h2 { margin: 0 0 10px; font-size: 20px; color:#0f172a; }
         .table-wrap { overflow-x: auto; border-radius: 16px; box-shadow: 0 2px 8px rgba(15,23,42,.06); border: 1px solid var(--line); background:#fff; }
         table { width: 100%; border-collapse: separate; border-spacing: 0; background: white; min-width: 980px; }
-        th, td { padding: 12px 11px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 14px; color:#1f2937; }
+        th, td { padding: 13px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; font-size: 14px; color:#1f2937; }
         th { background: #f8fbff; color: #1e3a8a; font-weight: 800; position: sticky; top: 0; z-index:1; }
         thead th:first-child { border-top-left-radius: 16px; }
         thead th:last-child { border-top-right-radius: 16px; }
@@ -1370,7 +1384,7 @@ ${adsSectionHtml}
         .rank-cell { width: 42px; text-align:center; color:#475569; }
         .num-cell { text-align:center; white-space:nowrap; }
         .ad-cell { min-width: 230px; }
-        .ad-name { font-size: 14px; font-weight: 800; color:#111827; line-height:1.25; }
+        .ad-name { font-size: 15px; font-weight: 800; color:#111827; line-height:1.25; }
         .ad-id { margin-top: 3px; font-size: 11px; color:#9ca3af; font-weight: 500; letter-spacing:.1px; }
         .rate-pill { display:inline-block; margin-top:4px; padding:3px 8px; border-radius:999px; font-size:11px; font-weight:700; }
         .pill-good { color:#15803d; background:#dcfce7; }
@@ -1393,7 +1407,7 @@ ${adsSectionHtml}
         .chip.good { background:#dcfce7; color:#166534; }
         .chip.mid { background:#fef3c7; color:#92400e; }
         .chip.low { background:#ffe4e6; color:#be123c; }
-        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .products { grid-template-columns: repeat(2, 1fr); } .filters { grid-template-columns: repeat(1, 1fr); } .header { display: block; } .btns { justify-content:flex-start; margin-top: 12px; } th, td { font-size: 13px; padding: 9px; } .ad-name { font-size:13px; } .ad-id { font-size:10px; } }
+        @media (max-width: 900px) { .grid { grid-template-columns: repeat(2, 1fr); } .products { grid-template-columns: repeat(2, 1fr); } .filters { grid-template-columns: repeat(1, 1fr); } .header { display: block; } .btns { justify-content:flex-start; margin-top: 12px; } th, td { font-size: 12px; padding: 9px; } .ad-name { font-size:13px; } .ad-id { font-size:10px; } }
     </style>
 </head>
 <body>
@@ -1453,7 +1467,7 @@ ${adsSectionHtml}
             </div>
             <div class="filter">
                 <label>Bảng quảng cáo</label>
-                <select id="adsDisplaySelect" onchange="applyDashboardFilters()">
+                <select id="adsSelect" onchange="applyDashboardFilters()">
                     <option value="show" ${dashboardSelected("show", currentAdsDisplay)}>Hiện bảng QC</option>
                     <option value="hide" ${dashboardSelected("hide", currentAdsDisplay)}>Ẩn bảng QC</option>
                 </select>
@@ -1482,20 +1496,7 @@ ${adsSectionHtml}
             <div class="card red"><div class="label">Không mua</div><div class="num">${stats.notBuy}</div></div>
         </div>
 
-        <div class="section" id="ads">
-            <h2>📈 Hiệu quả theo quảng cáo đang hoạt động</h2>
-            <div class="legend">
-                <span class="chip good">Xanh: tỷ lệ lấy SĐT ≥ 35%</span>
-                <span class="chip mid">Vàng: 20% - 34.9%</span>
-                <span class="chip low">Hồng: dưới 20%</span>
-            </div>
-            <div class="table-wrap">
-                <table>
-                    <thead><tr><th>#</th><th>Quảng cáo</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng chưa số</th><th>Sản phẩm chính</th></tr></thead>
-                    <tbody>${adsRows ? adsRows + adsTotalRow : `<tr><td colspan="9">Chưa có dữ liệu từ các quảng cáo đang hoạt động</td></tr>`}</tbody>
-                </table>
-            </div>
-        </div>
+${adsSectionHtml}
 
         <div class="section">
             <h2>Phân loại sản phẩm</h2>
@@ -1538,13 +1539,13 @@ function applyDashboardFilters() {
     const limit = document.getElementById('limitSelect').value;
     const view = document.getElementById('viewSelect').value;
     const product = document.getElementById('productSelect').value;
-    const adsDisplay = document.getElementById('adsDisplaySelect').value;
+    const ads = document.getElementById('adsSelect').value;
     const date = document.getElementById('dateInput').value;
     let path = '/dashboard';
     const params = new URLSearchParams();
     params.set('limit', limit);
     if (product && product !== 'all') params.set('product', product);
-    if (adsDisplay && adsDisplay !== 'show') params.set('ads', adsDisplay);
+    if (ads && ads !== 'show') params.set('ads', ads);
 
     if (view === 'today') {
         path = '/dashboard-today';
