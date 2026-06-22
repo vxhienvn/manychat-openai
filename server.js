@@ -12,6 +12,10 @@ const openai = new OpenAI({
     apiKey: OPENAI_API_KEY
 });
 
+// Bộ nhớ hội thoại tạm thời
+// Lưu trong RAM, Render restart thì mất
+const conversations = {};
+
 app.get('/', (req, res) => {
     res.send('Server OK');
 });
@@ -30,7 +34,7 @@ app.get('/webhook', (req, res) => {
     }
 });
 
-async function getAIReply(customerMessage) {
+async function getAIReply(history) {
     const response = await openai.responses.create({
         model: "gpt-4.1-mini",
         input: `
@@ -40,6 +44,7 @@ VAI TRÒ:
 - Trả lời như nhân viên bán hàng thật.
 - Không nói mình là AI nếu khách không hỏi.
 - Trả lời ngắn gọn, tự nhiên, không lan man.
+- Phải dựa vào lịch sử hội thoại, không hỏi lại thông tin khách đã nói.
 
 THÔNG TIN DOANH NGHIỆP:
 - Tổng kho phân phối toàn miền Bắc.
@@ -65,51 +70,23 @@ MỤC TIÊU ƯU TIÊN:
 3. Sau đó mới tư vấn sâu.
 
 KỊCH BẢN:
-
-KHÁCH HỎI QUẠT:
-- Ưu tiên xin số điện thoại/Zalo.
-- Hỏi diện tích phòng, ngân sách, phong cách.
-- Không cần ép khách ra showroom.
-
-KHÁCH HỎI THIẾT BỊ VỆ SINH / PHÒNG TẮM / GẠCH ĐÁ / NỘI THẤT:
-- Ưu tiên xin số điện thoại/Zalo.
-- Mời khách qua showroom 254 Phố Keo, Gia Lâm để xem thực tế.
-- Nhấn mạnh xem thực tế dễ chọn hơn ảnh.
-
-KHÁCH HỎI GIÁ:
-- Không tự bịa giá.
-- Nói giá phụ thuộc mẫu, kích thước, phiên bản và số lượng.
-- Xin số Zalo/điện thoại để gửi đúng mẫu và báo giá.
-
-KHÁCH CHÊ XA:
-- Không tranh cãi.
-- Nói bên em có hỗ trợ chi phí khách đến xem showroom theo chương trình.
-- Có hỗ trợ vận chuyển khi mua hàng theo chính sách.
-- Hỏi khách ở khu vực nào.
-
-KHÁCH CHÊ ĐẮT:
-- Nói bên em có nhiều phân khúc: cơ bản, trung cấp, cao cấp.
-- Cùng kiểu dáng thường có nhiều phiên bản.
-- Hỏi ngân sách và xin Zalo để gửi mẫu phù hợp.
-
-KHÁCH HỎI COMBO:
-- Nói có combo phối sẵn và combo tự chọn theo nhu cầu.
-- Xin số Zalo/điện thoại để gửi combo phù hợp.
-
-KHÁCH ĐỂ LẠI SỐ:
-- Cảm ơn khách.
-- Xác nhận sẽ có nhân viên liên hệ.
-- Hỏi thêm sản phẩm khách quan tâm.
+- Khách hỏi quạt: hỏi diện tích, ngân sách, phong cách nếu chưa có. Nếu khách đã nói diện tích/phong cách rồi thì không hỏi lại.
+- Khách hỏi thiết bị vệ sinh/phòng tắm/gạch đá/nội thất: xin số Zalo và mời qua showroom 254 Phố Keo, Gia Lâm.
+- Khách hỏi giá: không bịa giá, nói giá phụ thuộc mẫu/phiên bản/số lượng, xin Zalo để gửi mẫu và báo giá.
+- Khách chê xa: nói có hỗ trợ chi phí đến showroom theo chương trình và hỗ trợ vận chuyển khi mua hàng theo chính sách.
+- Khách chê đắt: nói có phân khúc cơ bản, trung cấp, cao cấp; hỏi ngân sách và xin Zalo.
+- Khách để lại số: cảm ơn, xác nhận nhân viên sẽ liên hệ, hỏi thêm sản phẩm quan tâm.
 
 QUY TẮC:
 - Tối đa 4 câu.
 - Tối đa 80 từ.
+- Không hỏi lại thông tin khách đã cung cấp.
 - Luôn cố gắng lấy số điện thoại hoặc Zalo.
 - Luôn kết thúc bằng câu hỏi.
 - Không tư vấn quá sâu khi chưa có thông tin liên hệ.
 
-Khách vừa nhắn:
-"${customerMessage}"
+LỊCH SỬ HỘI THOẠI:
+${history}
         `
     });
 
@@ -169,9 +146,22 @@ app.post('/webhook', async (req, res) => {
             console.log("Customer Message:", customerMessage);
 
             try {
+                if (!conversations[senderId]) {
+                    conversations[senderId] = [];
+                }
+
+                conversations[senderId].push(`Khách: ${customerMessage}`);
+
+                const history = conversations[senderId].slice(-10).join("\n");
+
                 console.log("Calling OpenAI...");
 
-                const aiReply = await getAIReply(customerMessage);
+                const aiReply = await getAIReply(history);
+
+                conversations[senderId].push(`Bot: ${aiReply}`);
+
+                // Chỉ giữ tối đa 20 dòng gần nhất để nhẹ server
+                conversations[senderId] = conversations[senderId].slice(-20);
 
                 console.log("AI Reply:", aiReply);
 
