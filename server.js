@@ -1001,6 +1001,14 @@ app.get('/bot-history-keys', (req, res) => {
     const conversations = loadConversations();
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.send(Object.keys(conversations).slice(0, 200).join("\n") || "Không có key nào");
+});app.get('/history-debug', (req, res) => {
+    const conversations = loadConversations();
+
+    res.json({
+        file: HISTORY_FILE,
+        keys: Object.keys(conversations).length,
+        sample: Object.keys(conversations).slice(0, 10)
+    });
 });
 // ===== DEBUG PANCAKE =====
 app.get('/pancake-debug', async (req, res) => {
