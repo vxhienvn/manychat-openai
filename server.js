@@ -316,7 +316,27 @@ function shouldSendCarousel(customerMessage) {
         "quạt này", "quat nay",
         "8 cánh", "8 canh",
         "10 cánh", "10 canh",
-        "combo này", "combo nay"
+        "combo này", "combo nay",
+
+        // Các câu khách hay dùng khi muốn xem mẫu/hình nhưng không nói đúng từ khóa cũ
+        "mẫu", "mau",
+        "mẫu nào", "mau nao",
+        "mẫu đẹp", "mau dep",
+        "mẫu khác", "mau khac",
+        "có mẫu khác", "co mau khac",
+        "xem thêm", "xem them",
+        "xem thêm mẫu", "xem them mau",
+        "tham khảo", "tham khao",
+        "catalog", "catalogue",
+        "hình", "hinh",
+        "hình thật", "hinh that",
+        "ảnh thật", "anh that",
+        "hình thực tế", "hinh thuc te",
+        "ảnh thực tế", "anh thuc te",
+
+        // Khi khách gửi ảnh/tệp, getCustomerMessageFromEvent sẽ tạo câu này
+        "khách vừa gửi", "khach vua gui",
+        "cần tư vấn mẫu này", "can tu van mau nay"
     ];
 
     return words.some(word => msg.includes(word));
@@ -652,6 +672,12 @@ async function handleMessage(event) {
     }
     processedMessages.add(messageId);
 
+    // Tránh Set phình quá lớn nếu server chạy lâu
+    if (processedMessages.size > 2000) {
+        processedMessages.clear();
+        processedMessages.add(messageId);
+    }
+
     const senderId = event.sender.id;
     const now = Date.now();
 
@@ -671,7 +697,12 @@ async function handleMessage(event) {
     }
 
     state.lastCustomerTime = now;
-    state.followUp8hSent = false;
+
+    // Không reset cờ chăm sóc nếu khách này đã từng được follow-up 1 lần.
+    // Điều này tránh việc khách nhắn lại rồi sau đó bot lại tự động chăm sóc lần 2.
+    if (!state.followUpOnceSent) {
+        state.followUp8hSent = false;
+    }
 
     if (hasPhoneOrContact(customerMessage)) {
         state.hasContact = true;
@@ -710,6 +741,14 @@ async function handleMessage(event) {
         if (state.lastCarouselTime && now - Number(state.lastCarouselTime) < carouselCooldown) {
             console.log("Carousel skipped, cooldown:", senderId);
         } else {
+            const replyLower = String(aiReply || "").toLowerCase();
+            if (!(replyLower.includes("bên dưới") || replyLower.includes("gửi mẫu") || replyLower.includes("mẫu bên"))) {
+                await sendMessage(
+                    senderId,
+                    "Dạ em gửi thêm một số mẫu bên dưới để anh tham khảo ngay ạ."
+                );
+            }
+
             const updatedHistory = conversations[senderId].slice(-30).join(" ");
             const productType = detectProductType(customerMessage, updatedHistory) || state.productType;
 
