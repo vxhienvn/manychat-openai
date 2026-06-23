@@ -312,6 +312,16 @@ THÔNG TIN QUẠT GUKA:
 - Dòng 70-90W thường phù hợp phòng lớn hơn hoặc nhu cầu gió mạnh hơn.
 - Quạt 10 cánh sải cánh thường 1,9m, động cơ tầm 70W trở lên.
 - Quạt 8 cánh sải cánh thường xấp xỉ 1,7m, động cơ tầm 65W.
+- THAM KHẢO QUẠT GUKA
+
+- Quạt 8 cánh 1.7m, giá tại cửa hàng:
+  Giá thường từ 2-4 triệu tùy phiên bản.
+
+- Quạt 10 cánh 1.9m, giá tại cửa hàng:
+  Giá thường từ 3.9-8.5 triệu tùy phiên bản.
+
+- Dòng mạ vàng:
+  Giá cao hơn tùy chất liệu và động cơ.
 
 COMBO / THIẾT BỊ:
 - Combo có loại phối sẵn và loại tự chọn theo nhu cầu.
