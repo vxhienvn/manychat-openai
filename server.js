@@ -997,6 +997,28 @@ ${phoneLines.length ? phoneLines.join("\n") : "Không có"}
         res.status(500).type('text/plain').send(`Lỗi khi thống kê Pancake: ${error.message}`);
     }
 });
+// ===== DEBUG PANCAKE =====
+app.get('/pancake-debug', async (req, res) => {
+    try {
+
+        const url =
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations` +
+            `?page_access_token=${encodeURIComponent(PANCAKE_PAGE_ACCESS_TOKEN)}`;
+
+        console.log("DEBUG URL:", url);
+
+        const response = await fetch(url);
+
+        const text = await response.text();
+
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+        res.send(text);
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).send(error.message);
+    }
+});
 // ===== XEM CHI TIẾT 1 HỘI THOẠI =====
 app.get('/pancake-conversation', async (req, res) => {
     try {
