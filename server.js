@@ -1019,7 +1019,7 @@ app.get('/pancake-debug', async (req, res) => {
         res.status(500).send(error.message);
     }
 });
-// ===== XEM CHI TIẾT 1 HỘI THOẠI =====
+// ===== DÒ API CHI TIẾT 1 HỘI THOẠI PANCAKE =====
 app.get('/pancake-conversation', async (req, res) => {
     try {
         const conversationId = req.query.id;
@@ -1028,24 +1028,40 @@ app.get('/pancake-conversation', async (req, res) => {
             return res.status(400).send("Thiếu conversation id");
         }
 
-        const url =
-            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations/${conversationId}` +
-            `?page_access_token=${encodeURIComponent(PANCAKE_PAGE_ACCESS_TOKEN)}`;
+        const token = encodeURIComponent(PANCAKE_PAGE_ACCESS_TOKEN);
 
-        console.log("TEST URL:", url);
-            const response = await fetch(url);
+        const urls = [
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations/${encodeURIComponent(conversationId)}?page_access_token=${token}`,
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations/${encodeURIComponent(conversationId)}/messages?page_access_token=${token}`,
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversation_messages?conversation_id=${encodeURIComponent(conversationId)}&page_access_token=${token}`,
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/messages?conversation_id=${encodeURIComponent(conversationId)}&page_access_token=${token}`
+        ];
 
-        const text = await response.text();
+        let output = "";
+
+        for (const url of urls) {
+            try {
+                const response = await fetch(url);
+                const text = await response.text();
+
+                output += `\n\n==============================\n`;
+                output += `URL: ${url.replace(PANCAKE_PAGE_ACCESS_TOKEN, "***TOKEN***")}\n`;
+                output += `STATUS: ${response.status}\n`;
+                output += `CONTENT-TYPE: ${response.headers.get("content-type")}\n`;
+                output += `BODY START:\n${text.slice(0, 3000)}\n`;
+            } catch (err) {
+                output += `\n\nURL ERROR: ${url}\n${err.message}\n`;
+            }
+        }
 
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
-        res.send(text);
+        res.send(output);
 
     } catch (error) {
         console.error(error);
         res.status(500).send(error.message);
     }
 });
-
 
 
 // ===== PANCAKE REVIEW MODULE =====
