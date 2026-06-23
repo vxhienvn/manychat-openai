@@ -1000,6 +1000,144 @@ ${phoneLines.length ? phoneLines.join("\n") : "Không có"}
 
 
 
+
+// ===== PANCAKE REVIEW MODULE =====
+// Endpoint dùng để rà chất lượng bot theo ngày, không fix cứng 25 hội thoại.
+// Cách dùng:
+// /pancake-review?limit=100&type=all
+// /pancake-review?limit=200&type=hot
+// /pancake-review?limit=200&type=no-phone
+// /pancake-review?limit=200&type=phone
+// /pancake-review?limit=200&type=zalo
+// /pancake-review?limit=200&type=called
+// /pancake-review?limit=200&type=no-called
+
+function pancakeVietnamDateString(date = new Date()) {
+    // Lấy ngày theo múi giờ Việt Nam để tránh Render chạy UTC làm lệch "hôm nay"
+    const vn = new Date(date.getTime() + 7 * 60 * 60 * 1000);
+    return vn.toISOString().slice(0, 10);
+}
+
+function pancakeConversationDateString(updatedAt) {
+    if (!updatedAt) return "";
+    const d = new Date(updatedAt);
+    if (Number.isNaN(d.getTime())) {
+        return String(updatedAt).slice(0, 10);
+    }
+    return pancakeVietnamDateString(d);
+}
+
+function pancakeReviewFilterRows(rows, type) {
+    const t = String(type || "all").toLowerCase();
+
+    if (t === "hot") {
+        return rows.filter(x => x.hot_lead && !x.has_phone);
+    }
+
+    if (t === "no-phone" || t === "no_phone") {
+        return rows.filter(x => !x.has_phone);
+    }
+
+    if (t === "phone" || t === "has-phone" || t === "has_phone") {
+        return rows.filter(x => x.has_phone);
+    }
+
+    if (t === "zalo") {
+        return rows.filter(x => x.tags.includes("Zalo"));
+    }
+
+    if (t === "called" || t === "da-goi" || t === "đã-gọi") {
+        return rows.filter(x => x.tags.includes("Đã Gọi"));
+    }
+
+    if (t === "no-called" || t === "chua-goi" || t === "chưa-gọi") {
+        return rows.filter(x => !x.tags.includes("Đã Gọi"));
+    }
+
+    return rows;
+}
+
+function pancakeReviewTypeLabel(type) {
+    const t = String(type || "all").toLowerCase();
+
+    if (t === "hot") return "Khách nóng chưa có số";
+    if (t === "no-phone" || t === "no_phone") return "Khách chưa có số";
+    if (t === "phone" || t === "has-phone" || t === "has_phone") return "Khách đã có số";
+    if (t === "zalo") return "Khách có tag Zalo";
+    if (t === "called" || t === "da-goi" || t === "đã-gọi") return "Khách đã gọi";
+    if (t === "no-called" || t === "chua-goi" || t === "chưa-gọi") return "Khách chưa gọi";
+
+    return "Tất cả hội thoại hôm nay";
+}
+
+app.get('/pancake-review', async (req, res) => {
+    try {
+        const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
+        const type = String(req.query.type || "all").toLowerCase();
+        const date = req.query.date ? String(req.query.date).slice(0, 10) : pancakeVietnamDateString();
+
+        const conversations = await pancakeFetchConversations(limit);
+        const report = conversations.map(pancakeBuildCustomerRow);
+
+        const todayRows = report.filter(x => pancakeConversationDateString(x.updated_at) === date);
+        const rows = pancakeReviewFilterRows(todayRows, type);
+
+        const summary = {
+            total_today: todayRows.length,
+            showing: rows.length,
+            has_phone: rows.filter(x => x.has_phone).length,
+            no_phone: rows.filter(x => !x.has_phone).length,
+            hot_no_phone: rows.filter(x => x.hot_lead && !x.has_phone).length,
+            zalo: rows.filter(x => x.tags.includes("Zalo")).length,
+            called: rows.filter(x => x.tags.includes("Đã Gọi")).length
+        };
+
+        res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+
+        let text = "";
+        text += `PANCAKE REVIEW BOT\n`;
+        text += `Ngày: ${date}\n`;
+        text += `Loại xem: ${pancakeReviewTypeLabel(type)}\n`;
+        text += `Số hội thoại lấy gần nhất: ${limit}\n\n`;
+
+        text += `TỔNG QUAN THEO BỘ LỌC\n`;
+        text += `- Hội thoại hôm nay trong dữ liệu lấy về: ${summary.total_today}\n`;
+        text += `- Đang hiển thị: ${summary.showing}\n`;
+        text += `- Có số điện thoại: ${summary.has_phone}\n`;
+        text += `- Chưa có số điện thoại: ${summary.no_phone}\n`;
+        text += `- Khách nóng chưa có số: ${summary.hot_no_phone}\n`;
+        text += `- Có tag Zalo: ${summary.zalo}\n`;
+        text += `- Đã gọi: ${summary.called}\n\n`;
+
+        text += `DANH SÁCH HỘI THOẠI\n`;
+
+        if (rows.length === 0) {
+            text += `Không có hội thoại phù hợp bộ lọc này.\n`;
+        }
+
+        rows.forEach((x, index) => {
+            text += `\n${index + 1}. ${x.name} | ${x.product} | ${x.updated_at}\n`;
+            text += `   ID: ${x.conversation_id}\n`;
+            text += `   SĐT: ${x.phones.join(", ") || "Chưa có"}\n`;
+            text += `   Tags: ${x.tags.join(", ") || "Không có"}\n`;
+            text += `   Khách nóng: ${x.hot_lead ? "Có" : "Không"}\n`;
+            text += `   Nội dung gần nhất: ${x.snippet || ""}\n`;
+        });
+
+        text += `\n\nGỢI Ý LINK NHANH\n`;
+        text += `/pancake-review?limit=${limit}&type=all\n`;
+        text += `/pancake-review?limit=${limit}&type=hot\n`;
+        text += `/pancake-review?limit=${limit}&type=no-phone\n`;
+        text += `/pancake-review?limit=${limit}&type=phone\n`;
+        text += `/pancake-review?limit=${limit}&type=no-called\n`;
+
+        res.send(text);
+    } catch (error) {
+        console.error("Pancake review error:", error);
+        res.status(500).type('text/plain').send("Lỗi khi tạo Pancake review: " + error.message);
+    }
+});
+
 // ===== DASHBOARD MODULE =====
 // Dashboard tổng quan, theo ngày, theo giờ, khách nóng và bộ lọc chọn nhanh trên điện thoại.
 // Link dùng nhanh:
