@@ -997,7 +997,31 @@ ${phoneLines.length ? phoneLines.join("\n") : "Không có"}
         res.status(500).type('text/plain').send(`Lỗi khi thống kê Pancake: ${error.message}`);
     }
 });
+// ===== XEM CHI TIẾT 1 HỘI THOẠI =====
+app.get('/pancake-conversation', async (req, res) => {
+    try {
+        const conversationId = req.query.id;
 
+        if (!conversationId) {
+            return res.status(400).send("Thiếu conversation id");
+        }
+
+        const url =
+            `https://pages.fm/api/public_api/v2/pages/${PANCAKE_PAGE_ID}/conversations/${conversationId}` +
+            `?page_access_token=${encodeURIComponent(PANCAKE_PAGE_ACCESS_TOKEN)}`;
+
+        const response = await fetch(url);
+
+        const text = await response.text();
+
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.send(text);
+
+    } catch (error) {
+        console.error(error);
+        res.status(500).send(error.message);
+    }
+});
 
 
 
