@@ -1019,6 +1019,15 @@ app.get('/pancake-debug', async (req, res) => {
         res.status(500).send(error.message);
     }
 });
+app.get('/bot-history', (req, res) => {
+    const id = req.query.id;
+    if (!id) return res.status(400).send("Thiếu id khách/PSID");
+
+    const history = conversations[id] || [];
+
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(history.join("\n\n") || "Không có lịch sử trong server");
+});
 // ===== DÒ API CHI TIẾT 1 HỘI THOẠI PANCAKE =====
 app.get('/pancake-conversation', async (req, res) => {
     try {
