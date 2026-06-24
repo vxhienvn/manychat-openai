@@ -1498,11 +1498,9 @@ app.get('/pancake-review', async (req, res) => {
     }
 });
 
-// ===== DASHBOARD MODULE V2.1 =====
-// Dashboard tổng quan + Meta Ads spend + Pancake cache.
-// Yêu cầu Render Environment:
-// META_ACCESS_TOKEN=...
-// META_AD_ACCOUNT_ID=act_xxxxxxxxx
+// ===== DASHBOARD MODULE V2.2 =====
+// Meta là nguồn chính cho bảng quảng cáo: chỉ hiện QC có chi tiêu trong khoảng thời gian đã chọn.
+// Pancake chỉ dùng để map hội thoại/số điện thoại/tags vào các QC đang có spend.
 
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID;
@@ -1540,6 +1538,28 @@ function dashboardTodayKeyVN(offsetDays = 0) {
     return `${y}-${m}-${d}`;
 }
 
+function dashboardMoney(value) {
+    const num = Number(value || 0);
+    if (!Number.isFinite(num) || num <= 0) return "0 đ";
+    return `${Math.round(num).toLocaleString("vi-VN")} đ`;
+}
+
+function dashboardCost(spend, count) {
+    const s = Number(spend || 0);
+    const c = Number(count || 0);
+    if (!s || !c) return "--";
+    return dashboardMoney(s / c);
+}
+
+function dashboardRate(part, total) {
+    if (!total) return "0.0";
+    return ((part / total) * 100).toFixed(1);
+}
+
+function dashboardSelected(value, current) {
+    return String(value) === String(current) ? "selected" : "";
+}
+
 function dashboardNormalizeProduct(product = "all") {
     const value = String(product || "all").toLowerCase();
     const map = {
@@ -1573,31 +1593,10 @@ function dashboardGetViewValue(req, mode) {
     if (mode === "today") return "today";
     if (mode === "yesterday") return "yesterday";
     if (mode === "hot") return "hot";
+    if (req.query.preset) return String(req.query.preset);
     if (req.query.hours) return `hours:${req.query.hours}`;
     if (req.query.date) return "date";
     return "all";
-}
-
-function dashboardSelected(value, current) {
-    return String(value) === String(current) ? "selected" : "";
-}
-
-function dashboardRate(part, total) {
-    if (!total) return "0.0";
-    return ((part / total) * 100).toFixed(1);
-}
-
-function dashboardMoney(value) {
-    const num = Number(value || 0);
-    if (!Number.isFinite(num) || num <= 0) return "0 đ";
-    return `${Math.round(num).toLocaleString("vi-VN")} đ`;
-}
-
-function dashboardCost(spend, count) {
-    const s = Number(spend || 0);
-    const c = Number(count || 0);
-    if (!s || !c) return "--";
-    return dashboardMoney(s / c);
 }
 
 function dashboardFormatTags(tags = []) {
@@ -1626,30 +1625,51 @@ function dashboardProductSummary(productCount) {
         .join(", ") || "Chưa rõ";
 }
 
-function dashboardFilterReport(report, req, mode = "all") {
-    const dateParam = req.query.date;
-    const hoursParam = req.query.hours;
-    let title = "Tổng quan gần nhất";
-    let filtered = report;
+function dashboardGetMetaDateRange(req, mode = "all") {
+    const preset = String(req.query.preset || "").toLowerCase();
 
-    if (hoursParam) {
-        const hours = Math.min(Math.max(Number(hoursParam) || 24, 1), 168);
+    if (req.query.since && req.query.until) {
+        return { since: String(req.query.since), until: String(req.query.until), label: `${req.query.since} → ${req.query.until}` };
+    }
+
+    if (req.query.date) {
+        return { since: String(req.query.date), until: String(req.query.date), label: String(req.query.date) };
+    }
+
+    if (preset === "last_7d") {
+        return { since: dashboardTodayKeyVN(-6), until: dashboardTodayKeyVN(0), label: "7 ngày gần nhất" };
+    }
+
+    if (preset === "last_30d") {
+        return { since: dashboardTodayKeyVN(-29), until: dashboardTodayKeyVN(0), label: "30 ngày gần nhất" };
+    }
+
+    if (mode === "yesterday") {
+        const d = dashboardTodayKeyVN(-1);
+        return { since: d, until: d, label: d };
+    }
+
+    // Mặc định dashboard và Meta cùng tính theo ngày Việt Nam.
+    const today = dashboardTodayKeyVN(0);
+    return { since: today, until: today, label: today };
+}
+
+function dashboardFilterReport(report, req, mode = "all") {
+    const dateRange = dashboardGetMetaDateRange(req, mode);
+    let title = `Khoảng ${dateRange.label}`;
+    let filtered = report.filter(x => {
+        const key = dashboardDateKeyVN(x.updated_at || x.inserted_at || "");
+        return key && key >= dateRange.since && key <= dateRange.until;
+    });
+
+    if (req.query.hours) {
+        const hours = Math.min(Math.max(Number(req.query.hours) || 24, 1), 168);
         const fromTime = Date.now() - hours * 60 * 60 * 1000;
         title = `${hours} giờ gần nhất`;
-        filtered = filtered.filter(x => {
+        filtered = report.filter(x => {
             const t = new Date(x.updated_at).getTime();
             return !Number.isNaN(t) && t >= fromTime;
         });
-    } else {
-        let targetDate = null;
-        if (dateParam) targetDate = String(dateParam).trim();
-        else if (mode === "today") targetDate = dashboardTodayKeyVN(0);
-        else if (mode === "yesterday") targetDate = dashboardTodayKeyVN(-1);
-
-        if (targetDate) {
-            title = `Ngày ${targetDate}`;
-            filtered = filtered.filter(x => dashboardDateKeyVN(x.updated_at) === targetDate);
-        }
     }
 
     const productName = dashboardNormalizeProduct(req.query.product || "all");
@@ -1663,7 +1683,7 @@ function dashboardFilterReport(report, req, mode = "all") {
         filtered = filtered.filter(x => x.hot_lead && !x.has_phone);
     }
 
-    return { title, report: filtered, productName };
+    return { title, report: filtered, productName, dateRange };
 }
 
 function dashboardBuildStats(report) {
@@ -1673,7 +1693,6 @@ function dashboardBuildStats(report) {
     const hotNoPhone = report.filter(x => x.hot_lead && !x.has_phone);
     const called = report.filter(x => x.tags.includes("Đã Gọi")).length;
     const zalo = report.filter(x => x.tags.includes("Zalo")).length;
-    const notBuy = report.filter(x => x.tags.includes("k mua")).length;
     const phoneRate = total ? ((hasPhone / total) * 100).toFixed(1) : "0.0";
     const productCount = {
         quat: report.filter(x => x.product === "Quạt").length,
@@ -1683,17 +1702,7 @@ function dashboardBuildStats(report) {
         bonTam: report.filter(x => x.product === "Bồn tắm").length,
         khac: report.filter(x => x.product === "Khác").length
     };
-    return { total, hasPhone, noPhone, hotNoPhone, called, zalo, notBuy, phoneRate, productCount };
-}
-
-function dashboardGetMetaDateRange(req, mode = "all") {
-    if (req.query.date) return { since: String(req.query.date), until: String(req.query.date), label: String(req.query.date) };
-    if (mode === "yesterday") {
-        const d = dashboardTodayKeyVN(-1);
-        return { since: d, until: d, label: d };
-    }
-    const today = dashboardTodayKeyVN(0);
-    return { since: today, until: today, label: today };
+    return { total, hasPhone, noPhone, hotNoPhone, called, zalo, phoneRate, productCount };
 }
 
 async function dashboardFetchPancakeCached(limit) {
@@ -1725,7 +1734,9 @@ async function dashboardFetchMetaAdsCached(dateRange) {
         fromCache: false,
         ads: [],
         byId: {},
-        totalSpend: 0
+        totalSpend: 0,
+        rawTotalSpend: 0,
+        dateRange
     };
 
     if (!result.enabled) {
@@ -1733,7 +1744,8 @@ async function dashboardFetchMetaAdsCached(dateRange) {
         return result;
     }
 
-    const key = `${META_AD_ACCOUNT_ID}:${dateRange.since}:${dateRange.until}`;
+    const account = String(META_AD_ACCOUNT_ID).startsWith("act_") ? META_AD_ACCOUNT_ID : `act_${META_AD_ACCOUNT_ID}`;
+    const key = `${account}:${dateRange.since}:${dateRange.until}:spend-positive-only`;
     const cached = dashboardCache.meta.get(key);
     const now = Date.now();
     if (cached && now - cached.time < DASHBOARD_META_CACHE_TTL) {
@@ -1742,7 +1754,6 @@ async function dashboardFetchMetaAdsCached(dateRange) {
 
     try {
         const token = encodeURIComponent(META_ACCESS_TOKEN);
-        const account = String(META_AD_ACCOUNT_ID).startsWith("act_") ? META_AD_ACCOUNT_ID : `act_${META_AD_ACCOUNT_ID}`;
         const range = encodeURIComponent(JSON.stringify({ since: dateRange.since, until: dateRange.until }));
 
         const adsUrl = `https://graph.facebook.com/v23.0/${account}/ads?fields=id,name,status,effective_status,configured_status,campaign{id,name},adset{id,name}&limit=500&access_token=${token}`;
@@ -1753,54 +1764,50 @@ async function dashboardFetchMetaAdsCached(dateRange) {
             dashboardFetchJson(insightsUrl)
         ]);
 
-        const byId = {};
+        const metaInfoById = {};
         for (const ad of adsData.data || []) {
-            byId[String(ad.id)] = {
+            metaInfoById[String(ad.id)] = {
                 adId: String(ad.id),
                 name: ad.name || `QC ${ad.id}`,
                 status: ad.effective_status || ad.configured_status || ad.status || "UNKNOWN",
                 campaignName: ad.campaign?.name || "",
-                adsetName: ad.adset?.name || "",
-                spend: 0,
-                impressions: 0,
-                clicks: 0,
-                reach: 0,
-                cpc: 0,
-                cpm: 0,
-                ctr: 0
+                adsetName: ad.adset?.name || ""
             };
         }
+
+        const byId = {};
+        let rawTotalSpend = 0;
 
         for (const item of insightsData.data || []) {
             const id = String(item.ad_id || "");
             if (!id) continue;
-            if (!byId[id]) {
-                byId[id] = {
-                    adId: id,
-                    name: item.ad_name || `QC ${id}`,
-                    status: "UNKNOWN",
-                    campaignName: "",
-                    adsetName: "",
-                    spend: 0,
-                    impressions: 0,
-                    clicks: 0,
-                    reach: 0,
-                    cpc: 0,
-                    cpm: 0,
-                    ctr: 0
-                };
-            }
-            byId[id].spend = Number(item.spend || 0);
-            byId[id].impressions = Number(item.impressions || 0);
-            byId[id].clicks = Number(item.clicks || 0);
-            byId[id].reach = Number(item.reach || 0);
-            byId[id].cpc = Number(item.cpc || 0);
-            byId[id].cpm = Number(item.cpm || 0);
-            byId[id].ctr = Number(item.ctr || 0);
+
+            const spend = Number(item.spend || 0);
+            rawTotalSpend += spend;
+
+            // Quy tắc báo cáo mới: chỉ hiển thị QC có chi tiêu trong khoảng đang chọn.
+            if (spend <= 0) continue;
+
+            const info = metaInfoById[id] || {};
+            byId[id] = {
+                adId: id,
+                name: item.ad_name || info.name || `QC ${id}`,
+                status: info.status || "UNKNOWN",
+                campaignName: info.campaignName || "",
+                adsetName: info.adsetName || "",
+                spend,
+                impressions: Number(item.impressions || 0),
+                clicks: Number(item.clicks || 0),
+                reach: Number(item.reach || 0),
+                cpc: Number(item.cpc || 0),
+                cpm: Number(item.cpm || 0),
+                ctr: Number(item.ctr || 0)
+            };
         }
 
         result.byId = byId;
-        result.ads = Object.values(byId);
+        result.ads = Object.values(byId).sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0));
+        result.rawTotalSpend = rawTotalSpend;
         result.totalSpend = result.ads.reduce((sum, x) => sum + Number(x.spend || 0), 0);
         dashboardCache.meta.set(key, { time: now, data: result });
         return result;
@@ -1820,10 +1827,12 @@ function dashboardAdRowClass(row) {
 
 function dashboardBuildAdStats(report, metaData) {
     const map = {};
+    const allowedAdIds = new Set((metaData?.ads || []).map(ad => String(ad.adId)));
 
+    // Meta là nguồn chính: chỉ tạo dòng cho QC có spend > 0 trong khoảng đã chọn.
     for (const ad of metaData?.ads || []) {
-        map[ad.adId] = {
-            adId: ad.adId,
+        map[String(ad.adId)] = {
+            adId: String(ad.adId),
             name: ad.name || `QC ${ad.adId}`,
             status: ad.status || "UNKNOWN",
             campaignName: ad.campaignName || "",
@@ -1847,38 +1856,15 @@ function dashboardBuildAdStats(report, metaData) {
         };
     }
 
+    // Pancake chỉ map hội thoại vào những QC đang có spend. Không tạo dòng QC lạ từ Pancake nữa.
     for (const item of report) {
         const ids = Array.isArray(item.ad_ids) ? item.ad_ids.map(String).filter(Boolean) : [];
-        if (!ids.length) continue;
+        const matchedIds = ids.filter(id => allowedAdIds.has(id));
+        if (!matchedIds.length) continue;
 
-        for (const adId of ids) {
-            if (!map[adId]) {
-                map[adId] = {
-                    adId,
-                    name: metaData?.byId?.[adId]?.name || `QC ${adId}`,
-                    status: metaData?.byId?.[adId]?.status || "UNKNOWN",
-                    campaignName: metaData?.byId?.[adId]?.campaignName || "",
-                    adsetName: metaData?.byId?.[adId]?.adsetName || "",
-                    spend: Number(metaData?.byId?.[adId]?.spend || 0),
-                    impressions: Number(metaData?.byId?.[adId]?.impressions || 0),
-                    clicks: Number(metaData?.byId?.[adId]?.clicks || 0),
-                    reach: Number(metaData?.byId?.[adId]?.reach || 0),
-                    cpc: Number(metaData?.byId?.[adId]?.cpc || 0),
-                    cpm: Number(metaData?.byId?.[adId]?.cpm || 0),
-                    ctr: Number(metaData?.byId?.[adId]?.ctr || 0),
-                    total: 0,
-                    hasPhone: 0,
-                    noPhone: 0,
-                    zalo: 0,
-                    called: 0,
-                    hotNoPhone: 0,
-                    productCount: {},
-                    tagCount: {},
-                    staffCount: {}
-                };
-            }
-
+        for (const adId of matchedIds) {
             const row = map[adId];
+            if (!row) continue;
             row.total++;
             if (item.has_phone) row.hasPhone++;
             if (!item.has_phone) row.noPhone++;
@@ -1892,9 +1878,7 @@ function dashboardBuildAdStats(report, metaData) {
         }
     }
 
-    return Object.values(map).sort((a, b) =>
-        Number(b.spend || 0) - Number(a.spend || 0) || b.hasPhone - a.hasPhone || b.total - a.total
-    );
+    return Object.values(map).sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0));
 }
 
 function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, dateRange }) {
@@ -1904,9 +1888,11 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     const currentProduct = dashboardProductParamFromName(dashboardNormalizeProduct(req.query.product || "all"));
     const currentView = dashboardGetViewValue(req, mode);
     const currentDate = req.query.date || dashboardTodayKeyVN(0);
-    const totalSpend = metaData?.totalSpend || 0;
-    const totalCostPerConversation = dashboardCost(totalSpend, stats.total);
-    const totalCostPerPhone = dashboardCost(totalSpend, stats.hasPhone);
+    const totalSpend = Number(metaData?.totalSpend || 0);
+    const totalAdConversations = adsStats.reduce((sum, x) => sum + Number(x.total || 0), 0);
+    const totalAdPhones = adsStats.reduce((sum, x) => sum + Number(x.hasPhone || 0), 0);
+    const totalCostPerConversation = dashboardCost(totalSpend, totalAdConversations || stats.total);
+    const totalCostPerPhone = dashboardCost(totalSpend, totalAdPhones || stats.hasPhone);
     const metaTime = metaData?.fetchedAt ? new Date(metaData.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const pancakeTime = pancakeMeta?.fetchedAt ? new Date(pancakeMeta.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const metaNotice = metaData?.error ? `<div class="notice red-note">Meta Ads: ${dashboardEscapeHtml(metaData.error)}</div>` : "";
@@ -1971,7 +1957,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AIGUKA Dashboard V2.1</title>
+    <title>AIGUKA Dashboard V2.2</title>
     <style>
         body { margin:0; font-family:"Times New Roman", Times, serif; font-size:14px; background:#f8fafc; color:#111827; }
         .wrap { max-width:1480px; margin:0 auto; padding:18px; }
@@ -1986,7 +1972,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         .grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
         .card { background:white; border-radius:16px; padding:16px; box-shadow:0 1px 4px rgba(15,23,42,.08); border:1px solid #e2e8f0; }
         .card.blue { background:#eff6ff; border-color:#bfdbfe; } .card.green { background:#ecfdf5; border-color:#bbf7d0; } .card.red { background:#fef2f2; border-color:#fecaca; }
-        .card.orange { background:#fff7ed; border-color:#fed7aa; } .card.pink { background:#fdf2f8; border-color:#fbcfe8; } .card.gray { background:#f8fafc; border-color:#cbd5e1; }
+        .card.orange { background:#fff7ed; border-color:#fed7aa; } .card.pink { background:#fdf2f8; border-color:#fbcfe8; }
         .card .label { color:#475569; font-size:14px; } .card .num { margin-top:8px; font-size:28px; font-weight:800; color:#0f172a; }
         .section { margin-top:16px; }
         .section-head { display:flex; justify-content:space-between; align-items:center; gap:12px; background:#e0f2fe; border:1px solid #bae6fd; border-radius:14px; padding:12px 14px; margin-bottom:10px; }
@@ -2018,8 +2004,8 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         <div class="btns">
             <a class="green" href="/dashboard-today?limit=${currentLimit}">Hôm nay</a>
             <a href="/dashboard-yesterday?limit=${currentLimit}">Hôm qua</a>
-            <a href="/dashboard?hours=24&limit=${currentLimit}">24 giờ</a>
-            <a href="/dashboard?limit=${currentLimit}">Gần nhất</a>
+            <a href="/dashboard?preset=last_7d&limit=${currentLimit}">7 ngày</a>
+            <a href="/dashboard?preset=last_30d&limit=${currentLimit}">30 ngày</a>
             <a class="red" href="/dashboard-hot?limit=${currentLimit}">Khách nóng</a>
             <a href="/pancake-report-text?limit=${currentLimit}">Bản text</a>
         </div>
@@ -2027,18 +2013,18 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 
     <div class="filters">
         <div class="filter"><label>Số hội thoại lấy</label><select id="limitSelect" onchange="applyDashboardFilters()"><option ${dashboardSelected(100,currentLimit)} value="100">100</option><option ${dashboardSelected(300,currentLimit)} value="300">300</option><option ${dashboardSelected(500,currentLimit)} value="500">500</option></select></div>
-        <div class="filter"><label>Khoảng xem</label><select id="viewSelect" onchange="applyDashboardFilters()"><option value="all" ${dashboardSelected("all",currentView)}>Gần nhất</option><option value="today" ${dashboardSelected("today",currentView)}>Hôm nay</option><option value="yesterday" ${dashboardSelected("yesterday",currentView)}>Hôm qua</option><option value="hours:24" ${dashboardSelected("hours:24",currentView)}>24 giờ</option><option value="hours:48" ${dashboardSelected("hours:48",currentView)}>48 giờ</option><option value="hot" ${dashboardSelected("hot",currentView)}>Khách nóng</option><option value="date" ${dashboardSelected("date",currentView)}>Ngày cụ thể</option></select></div>
+        <div class="filter"><label>Khoảng xem</label><select id="viewSelect" onchange="applyDashboardFilters()"><option value="today" ${dashboardSelected("today",currentView)}>Hôm nay</option><option value="yesterday" ${dashboardSelected("yesterday",currentView)}>Hôm qua</option><option value="last_7d" ${dashboardSelected("last_7d",currentView)}>7 ngày</option><option value="last_30d" ${dashboardSelected("last_30d",currentView)}>30 ngày</option><option value="date" ${dashboardSelected("date",currentView)}>Ngày cụ thể</option><option value="hot" ${dashboardSelected("hot",currentView)}>Khách nóng</option></select></div>
         <div class="filter"><label>Ngày cụ thể</label><input id="dateInput" type="date" value="${dashboardEscapeHtml(currentDate)}" onchange="document.getElementById('viewSelect').value='date'; applyDashboardFilters();" /></div>
         <div class="filter"><label>Sản phẩm</label><select id="productSelect" onchange="applyDashboardFilters()"><option value="all" ${dashboardSelected("all",currentProduct)}>Tất cả</option><option value="quat" ${dashboardSelected("quat",currentProduct)}>Quạt</option><option value="thiet_bi_ve_sinh" ${dashboardSelected("thiet_bi_ve_sinh",currentProduct)}>Thiết bị vệ sinh</option><option value="combo" ${dashboardSelected("combo",currentProduct)}>Combo phòng tắm</option><option value="bep" ${dashboardSelected("bep",currentProduct)}>Bếp</option><option value="bon_tam" ${dashboardSelected("bon_tam",currentProduct)}>Bồn tắm</option><option value="khac" ${dashboardSelected("khac",currentProduct)}>Khác</option></select></div>
-        <div class="filter"><label>Thao tác</label><select onchange="if(this.value) window.location.href=this.value"><option value="">Mở nhanh...</option><option value="/dashboard?limit=${currentLimit}">Dashboard</option><option value="/pancake-report-text?limit=${currentLimit}">Bản text</option><option value="/pancake-report?limit=${currentLimit}">JSON</option></select></div>
+        <div class="filter"><label>Thao tác</label><select onchange="if(this.value) window.location.href=this.value"><option value="">Mở nhanh...</option><option value="/dashboard-today?limit=${currentLimit}">Hôm nay</option><option value="/dashboard-yesterday?limit=${currentLimit}">Hôm qua</option><option value="/dashboard?preset=last_7d&limit=${currentLimit}">7 ngày</option><option value="/dashboard?preset=last_30d&limit=${currentLimit}">30 ngày</option><option value="/pancake-report-text?limit=${currentLimit}">Bản text</option></select></div>
     </div>
 
     ${metaNotice}
 
     <div class="grid">
         <div class="card green"><div class="label">Tổng chi tiêu</div><div class="num">${dashboardMoney(totalSpend)}</div></div>
-        <div class="card blue"><div class="label">Tổng hội thoại</div><div class="num">${stats.total}</div></div>
-        <div class="card green"><div class="label">Có số điện thoại</div><div class="num">${stats.hasPhone}</div></div>
+        <div class="card blue"><div class="label">Hội thoại từ QC có spend</div><div class="num">${totalAdConversations}</div></div>
+        <div class="card green"><div class="label">SĐT từ QC có spend</div><div class="num">${totalAdPhones}</div></div>
         <div class="card orange"><div class="label">Khách nóng</div><div class="num">${stats.hotNoPhone.length}</div></div>
         <div class="card pink"><div class="label">Cost/Hội thoại</div><div class="num">${totalCostPerConversation}</div></div>
         <div class="card red"><div class="label">Cost/SĐT</div><div class="num">${totalCostPerPhone}</div></div>
@@ -2049,20 +2035,11 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
             <h2>📊 Hiệu quả theo quảng cáo</h2>
             <div class="section-actions"><button class="toggle-btn" onclick="toggleAdsTable()">Ẩn/Hiện ▼</button><span>Tổng chi tiêu: ${dashboardMoney(totalSpend)}</span></div>
         </div>
-        <div class="advanced-box" id="advancedBox">
-            <b>📈 Chỉ số nâng cao:</b>
-            <label><input type="checkbox" data-col="adv-cpcv" onchange="toggleAdvancedColumns()"> Cost/Hội thoại</label>
-            <label><input type="checkbox" data-col="adv-cpps" onchange="toggleAdvancedColumns()"> Cost/SĐT</label>
-            <label><input type="checkbox" data-col="adv-cpc" onchange="toggleAdvancedColumns()"> CPC</label>
-            <label><input type="checkbox" data-col="adv-cpm" onchange="toggleAdvancedColumns()"> CPM</label>
-            <label><input type="checkbox" data-col="adv-ctr" onchange="toggleAdvancedColumns()"> CTR</label>
-        </div>
+        <div class="notice">Bảng này chỉ hiển thị các quảng cáo có chi tiêu &gt; 0 trong đúng khoảng thời gian đã chọn. Các mã quảng cáo từ Pancake nhưng không tiêu tiền trong khoảng này sẽ không hiển thị để báo cáo khớp Ads Manager.</div>
+        <div class="advanced-box" id="advancedBox"><b>📈 Chỉ số nâng cao:</b><label><input type="checkbox" data-col="adv-cpcv" onchange="toggleAdvancedColumns()"> Cost/Hội thoại</label><label><input type="checkbox" data-col="adv-cpps" onchange="toggleAdvancedColumns()"> Cost/SĐT</label><label><input type="checkbox" data-col="adv-cpc" onchange="toggleAdvancedColumns()"> CPC</label><label><input type="checkbox" data-col="adv-cpm" onchange="toggleAdvancedColumns()"> CPM</label><label><input type="checkbox" data-col="adv-ctr" onchange="toggleAdvancedColumns()"> CTR</label></div>
         <button class="toggle-btn" onclick="toggleAdvancedBox()">📈 Chỉ số nâng cao ▶</button>
         <div class="legend"><span class="chip good">Xanh: tỷ lệ SĐT ≥35%</span><span class="chip mid">Vàng: 20%-34.9%</span><span class="chip low">Hồng: dưới 20%</span></div>
-        <div class="table-wrap" id="adsTableWrap"><table>
-            <thead><tr><th>#</th><th>Quảng cáo</th><th>Trạng thái</th><th>Chi tiêu</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng</th><th>Nhân viên</th><th>Tags</th><th>Sản phẩm</th><th class="adv adv-cpcv">Cost/Hội thoại</th><th class="adv adv-cpps">Cost/SĐT</th><th class="adv adv-cpc">CPC</th><th class="adv adv-cpm">CPM</th><th class="adv adv-ctr">CTR</th></tr></thead>
-            <tbody>${adsRows || `<tr><td colspan="18">Chưa có dữ liệu quảng cáo</td></tr>`}</tbody>
-        </table></div>
+        <div class="table-wrap" id="adsTableWrap"><table><thead><tr><th>#</th><th>Quảng cáo</th><th>Trạng thái</th><th>Chi tiêu</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng</th><th>Nhân viên</th><th>Tags</th><th>Sản phẩm</th><th class="adv adv-cpcv">Cost/Hội thoại</th><th class="adv adv-cpps">Cost/SĐT</th><th class="adv adv-cpc">CPC</th><th class="adv adv-cpm">CPM</th><th class="adv adv-ctr">CTR</th></tr></thead><tbody>${adsRows || `<tr><td colspan="18">Không có quảng cáo nào tiêu tiền trong khoảng này hoặc Meta API chưa trả dữ liệu.</td></tr>`}</tbody></table></div>
     </div>
 
     <div class="section"><h2>Phân loại sản phẩm</h2><div class="products"><div class="product">Quạt <b>${stats.productCount.quat}</b></div><div class="product">Thiết bị vệ sinh <b>${stats.productCount.thietBiVeSinh}</b></div><div class="product">Combo phòng tắm <b>${stats.productCount.comboPhongTam}</b></div><div class="product">Bếp <b>${stats.productCount.bep}</b></div><div class="product">Bồn tắm <b>${stats.productCount.bonTam}</b></div><div class="product">Khác <b>${stats.productCount.khac}</b></div></div></div>
@@ -2075,7 +2052,7 @@ function toggleAdsTable(){ const el=document.getElementById('adsTableWrap'); if(
 function toggleAdvancedBox(){ const el=document.getElementById('advancedBox'); if(!el)return; el.style.display=el.style.display==='block'?'none':'block'; localStorage.setItem('aiguka_adv_box',el.style.display); }
 function toggleAdvancedColumns(){ document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ const show=cb.checked; document.querySelectorAll('.'+cb.dataset.col).forEach(el=>{ el.style.display=show?'table-cell':'none'; }); localStorage.setItem('aiguka_'+cb.dataset.col,show?'1':'0'); }); }
 function restoreDashboardState(){ const ads=document.getElementById('adsTableWrap'); if(ads && localStorage.getItem('aiguka_ads_table')) ads.style.display=localStorage.getItem('aiguka_ads_table'); const box=document.getElementById('advancedBox'); if(box && localStorage.getItem('aiguka_adv_box')) box.style.display=localStorage.getItem('aiguka_adv_box'); document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ cb.checked=localStorage.getItem('aiguka_'+cb.dataset.col)==='1'; }); toggleAdvancedColumns(); }
-function applyDashboardFilters(){ const limit=document.getElementById('limitSelect').value; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; let path='/dashboard'; const params=new URLSearchParams(); params.set('limit',limit); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view && view.startsWith('hours:')){params.set('hours',view.split(':')[1]);} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
+function applyDashboardFilters(){ const limit=document.getElementById('limitSelect').value; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; let path='/dashboard'; const params=new URLSearchParams(); params.set('limit',limit); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
 restoreDashboardState();
 </script>
 </body></html>`;
@@ -2087,8 +2064,7 @@ async function dashboardHandler(req, res, mode = "all") {
         const pancakeResult = await dashboardFetchPancakeCached(limit);
         const fullReport = pancakeResult.conversations.map(pancakeBuildCustomerRow);
         const filtered = dashboardFilterReport(fullReport, req, mode);
-        const dateRange = dashboardGetMetaDateRange(req, mode);
-        const metaData = await dashboardFetchMetaAdsCached(dateRange);
+        const metaData = await dashboardFetchMetaAdsCached(filtered.dateRange);
         res.type('html').send(dashboardRenderHtml({
             title: filtered.title,
             limit,
@@ -2098,7 +2074,7 @@ async function dashboardHandler(req, res, mode = "all") {
             mode,
             pancakeMeta: pancakeResult,
             metaData,
-            dateRange
+            dateRange: filtered.dateRange
         }));
     } catch (error) {
         console.error("Dashboard error:", error);
@@ -2119,8 +2095,29 @@ app.get('/dashboard-yesterday', async (req, res) => {
 });
 
 app.get('/dashboard-hot', async (req, res) => {
-    req.query.hours = req.query.hours || "24";
     await dashboardHandler(req, res, "hot");
+});
+
+app.get('/meta-debug', async (req, res) => {
+    try {
+        const dateRange = {
+            since: req.query.since || dashboardTodayKeyVN(-1),
+            until: req.query.until || req.query.since || dashboardTodayKeyVN(-1),
+            label: `${req.query.since || dashboardTodayKeyVN(-1)} → ${req.query.until || req.query.since || dashboardTodayKeyVN(-1)}`
+        };
+        const metaData = await dashboardFetchMetaAdsCached(dateRange);
+        res.json({
+            success: !metaData.error,
+            account: META_AD_ACCOUNT_ID,
+            dateRange,
+            error: metaData.error,
+            totalSpend: metaData.totalSpend,
+            totalSpendFormatted: dashboardMoney(metaData.totalSpend),
+            ads: metaData.ads.map(x => ({ ad_id: x.adId, name: x.name, status: x.status, spend: x.spend, spendFormatted: dashboardMoney(x.spend) }))
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
 });
 
 // ===== END DASHBOARD MODULE =====
