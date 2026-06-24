@@ -16,7 +16,9 @@ const STATE_FILE = path.join(__dirname, '..', 'customer_states.json');
 function loadConversations() {
     try {
         if (fs.existsSync(HISTORY_FILE)) {
-            return JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8'));
+            const raw = fs.readFileSync(HISTORY_FILE, 'utf8').trim();
+            if (!raw) return {};
+            return JSON.parse(raw);
         }
     } catch (error) {
         console.error("Load conversations error:", error);
@@ -35,7 +37,9 @@ function saveConversations(conversations) {
 function loadCustomerStates() {
     try {
         if (fs.existsSync(STATE_FILE)) {
-            return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+            const raw = fs.readFileSync(STATE_FILE, 'utf8').trim();
+            if (!raw) return {};
+            return JSON.parse(raw);
         }
     } catch (error) {
         console.error("Load customer states error:", error);
@@ -65,7 +69,10 @@ function ensureCustomerState(senderId) {
             followUpOnceSent: false,
 
             lastFollowUpTime: null,
-            lastCarouselTime: null
+            lastCarouselTime: null,
+            stage: "DISCOVERY",
+            sampleSentCount: 0,
+            lastPhoneAskTime: null
         };
     }
 
@@ -73,6 +80,10 @@ function ensureCustomerState(senderId) {
     if (typeof customerStates[senderId].followUpOnceSent === "undefined") {
         customerStates[senderId].followUpOnceSent = Boolean(customerStates[senderId].followUp8hSent);
     }
+
+    if (!customerStates[senderId].stage) customerStates[senderId].stage = "DISCOVERY";
+    if (typeof customerStates[senderId].sampleSentCount === "undefined") customerStates[senderId].sampleSentCount = 0;
+    if (typeof customerStates[senderId].lastPhoneAskTime === "undefined") customerStates[senderId].lastPhoneAskTime = null;
 
     return customerStates[senderId];
 }
@@ -123,6 +134,10 @@ function buildFollowUpMessage(productType) {
 
     if (productType === "combo") {
         return "Dạ em nhắn lại về bộ thiết bị vệ sinh/phòng tắm anh xem trước đó ạ. Bên em có combo phối sẵn và combo tự chọn theo ngân sách. Anh muốn em gợi ý thêm nhóm mẫu phổ thông hay đẹp hơn một chút ạ?";
+    }
+
+    if (productType === "kitchen" || productType === "kitchen_bath") {
+        return "Dạ em nhắn lại về phần bếp và phòng tắm anh xem trước đó ạ. Bên em có nhiều mẫu từ cơ bản đến cao cấp, có thể phối theo ngân sách. Anh muốn em gửi thêm nhóm mẫu phổ thông hay cao cấp hơn ạ?";
     }
 
     return null;
@@ -219,6 +234,7 @@ const openai = new OpenAI({
 const conversations = loadConversations();
 const customerStates = loadCustomerStates();
 const processedMessages = new Set();
+const carouselLocks = new Set();
 
 app.get('/', (req, res) => {
     res.send('Server OK');
@@ -243,48 +259,70 @@ function detectProductType(customerMessage, historyText) {
     const history = (historyText || "").toLowerCase();
     const combined = `${msg} ${history}`;
 
+    const fanWords = [
+        "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
+        "guka", "5 cánh", "5 canh", "8 cánh", "8 canh", "10 cánh", "10 canh",
+        "55w", "65w", "70w", "90w"
+    ];
+
+    const kitchenWords = [
+        "bếp", "bep", "thiết bị bếp", "thiet bi bep",
+        "bếp từ", "bep tu", "hút mùi", "hut mui", "máy hút mùi", "may hut mui",
+        "chậu rửa bát", "chau rua bat", "vòi bếp", "voi bep", "tủ bếp", "tu bep"
+    ];
+
     const faucetWords = [
         "lavabo", "chậu lavabo", "chau lavabo",
         "sen", "sen tắm", "sen tam",
         "vòi", "voi", "vòi rửa", "voi rua",
-        "chậu rửa", "chau rua"
+        "chậu rửa", "chau rua", "chậu rửa bát", "chau rua bat"
     ];
 
     const bathWords = [
         "combo", "phòng tắm", "phong tam", "nhà tắm", "nha tam",
         "nhà vệ sinh", "nha ve sinh", "thiết bị vệ sinh", "thiet bi ve sinh",
-        "bồn cầu", "bon cau", "bồn tắm", "bon tam", "bếp", "bep", "gạch", "gach"
+        "bồn cầu", "bon cau", "bồn tắm", "bon tam", "gạch", "gach"
     ];
 
-    const fanWords = [
-        "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
-        "5 cánh", "8 cánh", "10 cánh", "55w", "65w", "70w", "90w",
-        "cho xem quạt", "xem quạt", "gửi quạt", "gui quat", "xin quạt", "xin quat"
-    ];
+    const hasKitchenInMsg = kitchenWords.some(word => msg.includes(word));
+    const hasBathInMsg = bathWords.some(word => msg.includes(word));
+    const hasKitchenInHistory = kitchenWords.some(word => history.includes(word));
+    const hasBathInHistory = bathWords.some(word => history.includes(word));
 
-    // Ưu tiên tin nhắn mới trước để khách đổi chủ đề vẫn đúng
-    if (faucetWords.some(word => msg.includes(word))) return "faucet";
-    if (bathWords.some(word => msg.includes(word))) return "combo";
+    // Khách hỏi cả bếp và phòng tắm: giữ đúng nhu cầu tổng hợp, không ép về riêng sen/vòi.
+    if ((hasKitchenInMsg && hasBathInMsg) || (hasKitchenInMsg && hasBathInHistory) || (hasBathInMsg && hasKitchenInHistory)) {
+        return "kitchen_bath";
+    }
+
+    // Ưu tiên nội dung tin mới trước.
     if (fanWords.some(word => msg.includes(word))) return "fan";
+    if (hasKitchenInMsg) return "kitchen";
+    if (faucetWords.some(word => msg.includes(word))) return "faucet";
+    if (hasBathInMsg) return "combo";
 
     const askImageWords = [
         "gửi ảnh", "gui anh", "xin ảnh", "xin anh",
         "xem ảnh", "xem anh", "cho ảnh", "cho anh",
         "xem mẫu", "xem mau", "cho xem", "gửi mẫu", "gui mau",
-        "xin mẫu", "xin mau", "cho mẫu", "cho mau", "xem"
+        "xin mẫu", "xin mau", "cho mẫu", "cho mau", "xem",
+        "catalog", "catalogue", "album", "hình", "hinh", "tham khảo", "tham khao"
     ];
 
     const isAskingImage = askImageWords.some(word => msg.includes(word));
 
     if (isAskingImage || !msg.trim()) {
+        if (hasKitchenInHistory && hasBathInHistory) return "kitchen_bath";
+        if (fanWords.some(word => history.includes(word))) return "fan";
+        if (kitchenWords.some(word => history.includes(word))) return "kitchen";
         if (faucetWords.some(word => history.includes(word))) return "faucet";
         if (bathWords.some(word => history.includes(word))) return "combo";
-        if (fanWords.some(word => history.includes(word))) return "fan";
     }
 
+    if (kitchenWords.some(word => combined.includes(word)) && bathWords.some(word => combined.includes(word))) return "kitchen_bath";
+    if (fanWords.some(word => combined.includes(word))) return "fan";
+    if (kitchenWords.some(word => combined.includes(word))) return "kitchen";
     if (faucetWords.some(word => combined.includes(word))) return "faucet";
     if (bathWords.some(word => combined.includes(word))) return "combo";
-    if (fanWords.some(word => combined.includes(word))) return "fan";
 
     return null;
 }
@@ -411,10 +449,13 @@ COMBO / THIẾT BỊ:
 
 QUY TẮC:
 - Ưu tiên tư vấn có giá trị trước.
-- Nếu khách hỏi giá, xin mẫu, xin ảnh, hỏi "mẫu này bao nhiêu", "gửi mẫu", "cho xem mẫu": phải trả lời đúng sản phẩm trước, nói rõ khoảng giá nếu có dữ liệu, sau đó mới hỏi thêm 1 tiêu chí lọc mẫu.
-- Nếu khách muốn xem trên Messenger hoặc nói "gửi qua đây", "xem trên này", "cho xem ảnh", "xin mẫu", "xem mẫu","tu vấn", "tv", "xin thông tin", "gửi mẫu" : nói ngắn gọn rằng em gửi một số mẫu bán chạy trong đo có mẫu anh quan tâm bên dưới để anh tham khảo, rồi gửi ảnh hoặc slide sản phẩm liên quan, đồng thời  xin Zalo hoặc điện thoại để tư vấn ngay hoặc muốn xem nhiều mẫu hơn .
+- Nếu khách hỏi giá, xin mẫu, xin ảnh, hỏi "mẫu này bao nhiêu", "gửi mẫu", "cho xem mẫu": phải trả lời đúng sản phẩm trước, chỉ nói khoảng giá khi có dữ liệu chắc chắn, sau đó hỏi thêm tối đa 1 tiêu chí lọc mẫu.
+- Nếu khách muốn xem trên Messenger hoặc nói "gửi qua đây", "xem trên này", "cho xem ảnh", "xin mẫu", "xem mẫu", "tư vấn", "tv", "xin thông tin", "gửi mẫu": nói ngắn gọn rằng em gửi một số mẫu bán chạy bên dưới để anh/chị tham khảo. Server sẽ gửi carousel sau câu trả lời, không cần tự mô tả quá dài.
 - Không được nói "em gửi mẫu" nếu không có ý định gửi mẫu/slide ngay sau đó.
+- Không được tự nói lại nhiều lần rằng đã gửi mẫu; nếu đã nói gửi mẫu thì chỉ nói một lần ngắn gọn.
 - Không bịa giá chính xác nếu chưa có bảng giá. Có thể dùng khoảng giá tham khảo đã cho.
+- RIÊNG combo phòng tắm/thiết bị vệ sinh/nhà vệ sinh: tuyệt đối không tự nói giá chung 5-15 triệu hoặc 5-10 triệu. Chỉ nói có nhiều phân khúc từ cơ bản đến cao cấp, dòng cao cấp có thể lên tới vài chục triệu tùy số món, thương hiệu, chất liệu và mẫu chọn. Hãy mời khách chọn mẫu rồi báo giá chi tiết từng bộ.
+- Nếu khách hỏi cả bếp và phòng tắm thì giữ đúng nhu cầu tổng hợp, không tự thu hẹp thành riêng sen vòi/bếp/quạt.
 - Không xin số điện thoại/Zalo quá 1 lần trong 3 lượt trả lời liên tiếp.
 - Nếu khách đã bỏ qua yêu cầu xin số thì tiếp tục tư vấn, không xin lại ngay.
 - Nếu khách nhắn ký tự khó hiểu hoặc phàn nàn ảnh/video lỗi: hỏi lại ngắn gọn cần xem mẫu nào, không ép xin số ngay.
@@ -483,55 +524,55 @@ async function sendTemplate(senderId, elements, logName) {
 async function sendComboCarousel(senderId) {
     const elements = [
         {
-            title: "Combo cơ bản 4-6 triệu 01",
+            title: "Combo phổ thông 01",
             subtitle: "Phù hợp phòng tắm phổ thông, tiết kiệm chi phí",
             image_url: "https://scontent.fhan5-2.fna.fbcdn.net/v/t45.1600-4/721841502_3407023772807451_2219495493695105387_n.jpg?stp=dst-webp_fr_q75&_nc_cat=104&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeFmFpWydFScpHjZfZGIegsMnheWmvwORraeF5aa_A5Gtshvo5X27hDJxdHeib2fiKmaVuK0QZQfMqNZl0IwaXn2&_nc_ohc=1_7eDbD6dxgQ7kNvwEKcNjN&_nc_oc=AdqWd_2C8PLDr7llHjd9sGmu9MfMK4qRr9DjS4kS_mUXqSqO3nhkLgXMt6-CYgUr-qE&_nc_zt=1&_nc_ht=scontent.fhan5-2.fna&_nc_gid=kgSpCXlGMGObHmpM1uqlrQ&_nc_ss=7b2a8&oh=00_Af_yyrtvN6FYDEdWkds0WvrlBjF-MVk9K_EDfDjDCLH7MQ&oe=6A3F173F",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo cơ bản 4-6 triệu 02",
+            title: "Combo phổ thông 02",
             subtitle: "Bộ phối sẵn, dễ lắp cho nhà mới",
             image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/722363580_3407023566140805_6501584263051580923_n.jpg?stp=dst-webp_fr_q75&_nc_cat=111&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeFEEDG4i_WZ3FH8vERm_CT9M5ipV4CTLbYzmKlXgJMttnzTbZCsqhs984KgokKVm6LjzjW37p8bQBAmkuJgfaDV&_nc_ohc=P9N9qhDfw9gQ7kNvwGGjL3Z&_nc_oc=AdquXFo1OQfPJBT_9QY64KWMvMVHMGEqVAGZB0JcXSNo5YMHFPQ2A7s1YQD4by8rQwg&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=kgSpCXlGMGObHmpM1uqlrQ&_nc_ss=7b2a8&oh=00_Af-GqPMTnXFrpe8kYFE60q09ZyiiqjW30sc2OAtm4MtXBA&oe=6A3F041C",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo cơ bản 4-6 triệu 03",
+            title: "Combo phổ thông 03",
             subtitle: "Phù hợp căn hộ, nhà phố, phòng tắm nhỏ",
             image_url: "https://scontent.fhan5-8.fna.fbcdn.net/v/t45.1600-4/722030414_3407023492807479_4272071537859353682_n.jpg?stp=dst-webp_fr_q75&_nc_cat=106&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeEmWeC1VuHVVVPp2hWnGLOBH-h6fWPlTiUf6Hp9Y-VOJRKRGRjd3lbPUfl8IbbxcPJaHU6Z5ay2kWWkxKj68GWp&_nc_ohc=kG52JQwmI_gQ7kNvwG7w7Ly&_nc_oc=AdqaL5jaCh6XbOhVblfxC9NqVPdEZwZ0at5NMNCbf937lrKulDS2c128fEmk039k6vE&_nc_zt=1&_nc_ht=scontent.fhan5-8.fna&_nc_gid=u-xhVRGH8O-Wqel_CNFKtw&_nc_ss=7b2a8&oh=00_Af-hIP9YYe_Dwst8bucrNct7NYI9c5rDKuQjiwvtvX2-Xg&oe=6A3F1D71",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo cơ bản 4-6 triệu 04",
+            title: "Combo phổ thông 04",
             subtitle: "Mẫu tiết kiệm, đủ thiết bị cần dùng",
             image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/723543437_3407023759474119_1152871356518316127_n.jpg?stp=dst-webp_fr_q75&_nc_cat=111&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeHjHywu1goJoj4rcll7hF37F6gpfTctLaEXqCl9Ny0toRGp962s0cVTTIr0NxT6TtxgdcxzKY3qFS-de1IOZ3Pc&_nc_ohc=yzwCTaZRhFoQ7kNvwFNMXx0&_nc_oc=AdrhhhdBk_Z8t-wD3PfAlHk-sQO36rpf2BLfKg5HMbSXZOqBJRDIn0kR2_0suDtS2W4&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=kgSpCXlGMGObHmpM1uqlrQ&_nc_ss=7b2a8&oh=00_Af9LJOhU0JTA5oIbQWPKKxh1X4HkMFU8tHIm586YJbZHlQ&oe=6A3EFAE4",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo cơ bản 4-6 triệu 05",
+            title: "Combo phổ thông 05",
             subtitle: "Giá tốt, phù hợp công trình số lượng",
             image_url: "https://scontent.fhan5-6.fna.fbcdn.net/v/t45.1600-4/722097598_3407023746140787_3094052314991038689_n.jpg?stp=dst-webp_fr_q75&_nc_cat=107&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeEx-5JrjhDSW5WKTJ1O3Twutqkpy-DlegK2qSnL4OV6AoFZyLk67lU7xkXXNbOkpQK4XSCoXhWvqwK1eFRwjraQ&_nc_ohc=wXzQyGT8RYUQ7kNvwF7im1p&_nc_oc=AdoQXbeF_59hTALN9pqt3PjDyLLUZQnPY_C2Upb-p8zQaT48TZ82CH6RRFlTS6MMDgE&_nc_zt=1&_nc_ht=scontent.fhan5-6.fna&_nc_gid=kgSpCXlGMGObHmpM1uqlrQ&_nc_ss=7b2a8&oh=00_Af9IyJ9xVEqOPZ_cAhrl1ku_fen6k4TQuRawdK0U1aOTBQ&oe=6A3F06D5",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo đẹp 6-9 triệu 01",
+            title: "Combo đẹp 01",
             subtitle: "Mẫu đẹp hơn, phối đồng bộ",
             image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/724414534_3407023669474128_6654698488176819038_n.jpg?stp=dst-webp_fr_q75&_nc_cat=101&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeHACvlu0KvhLkjXOnnf6bOw9_sCnHDN9e_3-wKccM317-sN6_nRJrk0WbCMlpYG3AEXlLniBnW1DHIgvHDYTaA9&_nc_ohc=6WemwsdtinoQ7kNvwHVRB0a&_nc_oc=AdouwRUdoydBWrxsA-QQphXYGoL9DvO5Dmd282j-5hvGZfg931KjXi_KohvZa7l98xo&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=u-xhVRGH8O-Wqel_CNFKtw&_nc_ss=7b2a8&oh=00_Af_IKdEht3IyCtadRcq8idmCtJvhSh3JyPCFWa7WpOHD0A&oe=6A3F0FE9",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo đẹp 6-9 triệu 02",
+            title: "Combo đẹp 02",
             subtitle: "Phù hợp nhà mới, căn hộ, nhà phố",
             image_url: "https://scontent.fhan5-8.fna.fbcdn.net/v/t45.1600-4/722074589_3407023709474124_2192680801667191676_n.jpg?stp=dst-webp_q70_s168x128&_nc_cat=106&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeHnJ4k5B5lRET3XAU3IPYL2lLixa3kR35iUuLFreRHfmBxFcboZ3Cl35HcZb3SOT8N_gbiSz12TSecGCUu2IgPZ&_nc_ohc=X2qJ337q3QoQ7kNvwFZ426G&_nc_oc=AdrRVW6WYH-4TPLjnU5c1AcNrGo2_VNOmO5AWLSkZ8saz82SOj8ejLK34daenXCnTLY&_nc_zt=1&_nc_ht=scontent.fhan5-8.fna&_nc_gid=78RevIFYinNeeYQnD38J7Q&_nc_ss=7b2a8&oh=00_Af-vCD6REiM1VxHEJx1qwJVUUQdJScbaY5NpudcKmoFzMQ&oe=6A3EFDE6",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo đẹp 6-9 triệu 03",
+            title: "Combo đẹp 03",
             subtitle: "Tối ưu chi phí nhưng vẫn đẹp",
             image_url: "https://scontent.fhan5-11.fna.fbcdn.net/v/t45.1600-4/724838572_3407023849474110_3761190961699111613_n.jpg?stp=dst-webp_fr_q75&_nc_cat=103&ccb=1-7&_nc_sid=c8eb1d&_nc_eui2=AeEBRp7MplN8IqeHtPW6sC9PLTJcoG2ETS8tMlygbYRNL_r4u33rUMAjUqx3XVZCLnqzjBEfD9tWLxapY3b_fP0X&_nc_ohc=hmY84XaNO2EQ7kNvwGiYilH&_nc_oc=AdpOCfh0StWrmOjOF9COuqjsUU_q1LMuB33FUQxNm-vUh9EfAlyyk22rzTywbz3Fegc&_nc_zt=1&_nc_ht=scontent.fhan5-11.fna&_nc_gid=78RevIFYinNeeYQnD38J7Q&_nc_ss=7b2a8&oh=00_Af95Zz0PsNelB4Xo01bTvmacncpJ-2Mzbg4rDDWctzBAWw&oe=6A3EF4E1",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
         },
         {
-            title: "Combo cao cấp 10 triệu+",
+            title: "Combo cao cấp",
             subtitle: "Phù hợp nhà mới, biệt thự, khách sạn",
             image_url: "https://scontent.fhan5-10.fna.fbcdn.net/v/t45.1600-4/728503197_3412240415619120_7947162624555401843_n.jpg?stp=dst-jpg_s168x128_tt6&_nc_cat=111&ccb=1-7&_nc_sid=d73f9c&_nc_eui2=AeF3mk0nPsH2Q9Tj_wooFLnspveGQ3uv0Iqm94ZDe6_QihRdvyEEDe7E6_f1A-xPZA1mLA6EZ-40_6TLeqDdD4NH&_nc_ohc=Yg1pDqiM0jwQ7kNvwGkgVuD&_nc_oc=Adprj7JBg-qAMY54CeYbt5CqkBc7jGGTz_0PEt2leWO0N-q-cyWk7PvA_rvArjTHTEQ&_nc_zt=1&_nc_ht=scontent.fhan5-10.fna&_nc_gid=wVvG2jY_v91j5WXpHxrLyQ&_nc_ss=7b2a8&oh=00_Af-JfZhRivnIp5IXW8ZJT9eb5hXk0idM4mMk7r73vTnhPA&oe=6A3F2726",
             buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
@@ -658,6 +699,77 @@ async function sendFaucetCarousel(senderId) {
     await sendTemplate(senderId, elements, "Faucet carousel");
 }
 
+function shouldAutoSendCarouselAfterReply(text) {
+    const t = String(text || "").toLowerCase();
+
+    // Chỉ tự gửi carousel khi AI thật sự hứa gửi mẫu/ảnh bên dưới.
+    // Không dùng riêng cụm "để anh tham khảo" vì quá rộng, dễ làm bot gửi ảnh ngoài ý muốn.
+    const hasSampleWord =
+        t.includes("mẫu") ||
+        t.includes("mau") ||
+        t.includes("ảnh") ||
+        t.includes("anh") ||
+        t.includes("hình") ||
+        t.includes("hinh");
+
+    const hasSendPromise =
+        t.includes("gửi") ||
+        t.includes("gui") ||
+        t.includes("bên dưới") ||
+        t.includes("ben duoi") ||
+        t.includes("dưới đây") ||
+        t.includes("duoi day");
+
+    return hasSampleWord && hasSendPromise;
+}
+
+function hasRecentCarousel(state) {
+    if (!state || !state.lastCarouselTime) return false;
+    return Date.now() - Number(state.lastCarouselTime) < 5 * 60 * 1000;
+}
+
+function buildAfterSamplePhoneAsk(productType) {
+    if (productType === "kitchen_bath") {
+        return "Bên em còn nhiều mẫu phối đồng bộ bếp và phòng tắm hơn nữa. Anh cho em xin số Zalo hoặc số điện thoại, em gửi album đầy đủ và báo giá chi tiết từng bộ ạ.";
+    }
+
+    if (productType === "combo") {
+        return "Combo phòng tắm bên em có nhiều phân khúc từ cơ bản đến cao cấp, giá phụ thuộc số món, thương hiệu và mẫu chọn. Anh cho em xin số Zalo hoặc số điện thoại, em gửi album đầy đủ và báo giá chi tiết từng bộ ạ.";
+    }
+
+    if (productType === "fan") {
+        return "Anh thích mẫu nào hoặc cần theo diện tích phòng bao nhiêu m2 ạ? Anh cho em xin số Zalo hoặc số điện thoại, em gửi thêm mẫu thực tế và báo giá chi tiết ạ.";
+    }
+
+    return "Anh xem mẫu nào phù hợp thì nhắn em nhé. Anh cho em xin số Zalo hoặc số điện thoại, em gửi album đầy đủ và báo giá chi tiết từng mẫu ạ.";
+}
+
+async function sendCarouselByProduct(senderId, productType) {
+    if (productType === "combo") {
+        await sendComboCarousel(senderId);
+        return true;
+    }
+
+    if (productType === "fan") {
+        await sendFanCarousel(senderId);
+        return true;
+    }
+
+    if (productType === "faucet" || productType === "kitchen") {
+        await sendFaucetCarousel(senderId);
+        return true;
+    }
+
+    if (productType === "kitchen_bath") {
+        await sendComboCarousel(senderId);
+        await sendFaucetCarousel(senderId);
+        return true;
+    }
+
+    return false;
+}
+
+
 async function handleMessage(event) {
     if (!event.message) return;
     if (event.message.is_echo) return;
@@ -706,10 +818,11 @@ async function handleMessage(event) {
 
     if (hasPhoneOrContact(customerMessage)) {
         state.hasContact = true;
+        state.stage = "HUMAN_HANDOVER";
     }
 
     conversations[senderId].push(`Khách: ${customerMessage} | TIME:${now} | PRODUCT:${state.productType || "unknown"}`);
-    conversations[senderId] = conversations[senderId].slice(-60);
+    conversations[senderId] = conversations[senderId].slice(-80);
 
     saveConversations(conversations);
     saveCustomerStates(customerStates);
@@ -717,7 +830,7 @@ async function handleMessage(event) {
     const needCarousel = shouldSendCarousel(customerMessage);
     if (needCarousel) {
         conversations[senderId].push(`Hệ thống: Khách đang yêu cầu xem mẫu/giá. Sau câu trả lời này, server sẽ gửi carousel mẫu phù hợp nếu xác định được sản phẩm. Bot phải nói đang gửi mẫu bên dưới và không xin Zalo ngay.`);
-        conversations[senderId] = conversations[senderId].slice(-60);
+        conversations[senderId] = conversations[senderId].slice(-80);
         saveConversations(conversations);
     }
 
@@ -727,7 +840,7 @@ async function handleMessage(event) {
     const aiReply = await getAIReply(history);
 
     conversations[senderId].push(`Bot: ${aiReply} | TIME:${Date.now()} | PRODUCT:${state.productType || "unknown"}`);
-    conversations[senderId] = conversations[senderId].slice(-60);
+    conversations[senderId] = conversations[senderId].slice(-80);
 
     saveConversations(conversations);
     saveCustomerStates(customerStates);
@@ -735,41 +848,82 @@ async function handleMessage(event) {
     console.log("AI Reply:", aiReply);
     await sendMessage(senderId, aiReply);
 
-    if (needCarousel) {
-        const carouselCooldown = 5 * 60 * 1000;
+    const autoCarouselFromReply = shouldAutoSendCarouselAfterReply(aiReply);
+    const shouldSendAnyCarousel = needCarousel || autoCarouselFromReply;
 
-        if (state.lastCarouselTime && now - Number(state.lastCarouselTime) < carouselCooldown) {
+    if (shouldSendAnyCarousel) {
+        if (carouselLocks.has(senderId)) {
+            console.log("Carousel skipped, sender is locked:", senderId);
+            return;
+        }
+
+        if (hasRecentCarousel(state)) {
             console.log("Carousel skipped, cooldown:", senderId);
-        } else {
+            return;
+        }
+
+        const updatedHistory = conversations[senderId].slice(-30).join(" ");
+        const productType = detectProductType(customerMessage, updatedHistory) || state.productType;
+
+        if (!productType) {
+            console.log("Carousel skipped, unknown product type:", senderId, customerMessage);
+            return;
+        }
+
+        carouselLocks.add(senderId);
+
+        // Đặt cooldown trước khi gửi để chặn trường hợp webhook bị gọi lặp/gần như đồng thời.
+        state.lastCarouselTime = Date.now();
+        saveCustomerStates(customerStates);
+
+        try {
             const replyLower = String(aiReply || "").toLowerCase();
-            if (!(replyLower.includes("bên dưới") || replyLower.includes("gửi mẫu") || replyLower.includes("mẫu bên"))) {
-                await sendMessage(
-                    senderId,
-                    "Dạ em gửi thêm một số mẫu bên dưới để anh tham khảo ngay ạ."
-                );
+            const alreadyPromisedSample =
+                replyLower.includes("bên dưới") ||
+                replyLower.includes("ben duoi") ||
+                replyLower.includes("gửi mẫu") ||
+                replyLower.includes("gui mau") ||
+                replyLower.includes("gửi anh một số mẫu") ||
+                replyLower.includes("gửi chị một số mẫu");
+
+            if (!alreadyPromisedSample) {
+                await sendMessage(senderId, "Dạ em gửi thêm một số mẫu bên dưới để anh tham khảo ngay ạ.");
             }
 
-            const updatedHistory = conversations[senderId].slice(-30).join(" ");
-            const productType = detectProductType(customerMessage, updatedHistory) || state.productType;
+            const sent = await sendCarouselByProduct(senderId, productType);
 
-            if (productType === "combo") {
-                await sendComboCarousel(senderId);
-                state.lastCarouselTime = Date.now();
+            if (sent) {
+                state.lastSampleTime = Date.now();
+                state.stage = "GET_PHONE";
+                state.sampleSentCount = Number(state.sampleSentCount || 0) + 1;
                 saveCustomerStates(customerStates);
-            } else if (productType === "fan") {
-                await sendFanCarousel(senderId);
-                state.lastCarouselTime = Date.now();
-                saveCustomerStates(customerStates);
-            } else if (productType === "faucet") {
-                await sendFaucetCarousel(senderId);
-                state.lastCarouselTime = Date.now();
-                saveCustomerStates(customerStates);
+
+                // Chỉ xin số ngay sau mẫu nếu khách chưa có contact và chưa vừa xin gần đây.
+                const canAskPhone =
+                    !state.hasContact &&
+                    (!state.lastPhoneAskTime || Date.now() - Number(state.lastPhoneAskTime) > 10 * 60 * 1000);
+
+                if (canAskPhone) {
+                    const askPhoneText = buildAfterSamplePhoneAsk(productType);
+                    state.lastPhoneAskTime = Date.now();
+                    conversations[senderId].push(`Bot: ${askPhoneText} | TIME:${Date.now()} | PRODUCT:${productType}`);
+                    conversations[senderId] = conversations[senderId].slice(-80);
+                    saveConversations(conversations);
+                    saveCustomerStates(customerStates);
+
+                    await sendMessage(senderId, askPhoneText);
+                }
             } else {
-                console.log("Carousel skipped, unknown product type:", senderId, customerMessage);
+                // Nếu không gửi được carousel thì mở lại quyền gửi cho lần sau.
+                state.lastCarouselTime = null;
+                saveCustomerStates(customerStates);
             }
+        } finally {
+            carouselLocks.delete(senderId);
         }
     }
 }
+
 
 app.post('/webhook', async (req, res) => {
     console.log("========== WEBHOOK HIT ==========");
