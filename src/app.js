@@ -2282,10 +2282,15 @@ app.get('/pancake-review', async (req, res) => {
 
 const META_ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
 const META_AD_ACCOUNT_ID = process.env.META_AD_ACCOUNT_ID;
+// Có thể khai báo nhiều tài khoản bằng META_AD_ACCOUNT_IDS=act_xxx,act_yyy hoặc bật META_AUTO_AD_ACCOUNTS=true để lấy các tài khoản token truy cập được.
+const META_AD_ACCOUNT_IDS = process.env.META_AD_ACCOUNT_IDS || process.env.META_AD_ACCOUNTS || "";
+const META_AUTO_AD_ACCOUNTS = String(process.env.META_AUTO_AD_ACCOUNTS || "false").toLowerCase() === "true";
+const META_ACCOUNT_CARD_MAP = process.env.META_ACCOUNT_CARD_MAP || "";
 // Múi giờ tài khoản quảng cáo. Tài khoản hiện reset khoảng 14h giờ Việt Nam nên mặc định dùng America/Los_Angeles.
 // Có thể đổi trên Render nếu tài khoản Meta dùng múi giờ khác.
 const META_ACCOUNT_TIMEZONE = process.env.META_ACCOUNT_TIMEZONE || "America/Los_Angeles";
 const META_CARD_LAST4 = process.env.META_CARD_LAST4 || "";
+const PAYMENT_EVENTS_FILE = path.join(__dirname, "..", "payment_events.json");
 // Nếu muốn dashboard cộng thêm thuế theo hệ số riêng, đặt ví dụ 1.05 hoặc 1.10. Mặc định giữ nguyên số Meta trả về.
 const META_SPEND_TAX_MULTIPLIER = Number(process.env.META_SPEND_TAX_MULTIPLIER || 1);
 
@@ -2295,7 +2300,8 @@ const DASHBOARD_META_CACHE_TTL = 5 * 60 * 1000;
 const dashboardCache = {
     pancake: new Map(),
     meta: new Map(),
-    metaDaily: new Map()
+    metaDaily: new Map(),
+    metaAccounts: null
 };
 
 function dashboardEscapeHtml(value = "") {
@@ -2566,147 +2572,348 @@ async function dashboardFetchJson(url) {
     return data;
 }
 
+
+function dashboardNormalizeActId(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    return raw.startsWith("act_") ? raw : `act_${raw}`;
+}
+
+function dashboardParseAccountList(value = "") {
+    const raw = String(value || "").trim();
+    if (!raw) return [];
+    try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) return parsed.map(x => typeof x === "string" ? { id: x } : x).filter(Boolean);
+        if (parsed && typeof parsed === "object") {
+            return Object.entries(parsed).map(([id, info]) => ({ id, ...(typeof info === "object" ? info : { name: String(info || id) }) }));
+        }
+    } catch (_) {}
+    return raw.split(/[;,\n]+/).map(x => x.trim()).filter(Boolean).map(id => ({ id }));
+}
+
+function dashboardParseAccountCardMap() {
+    const map = {};
+    const raw = String(META_ACCOUNT_CARD_MAP || "").trim();
+    if (raw) {
+        try {
+            const parsed = JSON.parse(raw);
+            for (const [id, value] of Object.entries(parsed || {})) {
+                const act = dashboardNormalizeActId(id);
+                map[act] = typeof value === "object" ? String(value.card || value.last4 || "") : String(value || "");
+            }
+        } catch (_) {
+            for (const part of raw.split(/[;,\n]+/)) {
+                const [id, card] = part.split(/[=:]/).map(x => String(x || "").trim());
+                if (id && card) map[dashboardNormalizeActId(id)] = card;
+            }
+        }
+    }
+    if (META_CARD_LAST4 && META_AD_ACCOUNT_ID) map[dashboardNormalizeActId(META_AD_ACCOUNT_ID)] = META_CARD_LAST4;
+    return map;
+}
+
+async function dashboardGetMetaAccounts() {
+    const configured = dashboardParseAccountList(META_AD_ACCOUNT_IDS || META_AD_ACCOUNT_ID);
+    if (configured.length) {
+        return configured.map(x => {
+            const id = dashboardNormalizeActId(x.id || x.account_id || x.act || x);
+            return { id, name: x.name || x.accountName || id, cardLast4: x.card || x.cardLast4 || x.last4 || "" };
+        }).filter(x => x.id);
+    }
+
+    if (!META_AUTO_AD_ACCOUNTS || !META_ACCESS_TOKEN) return [];
+    const now = Date.now();
+    if (dashboardCache.metaAccounts && now - dashboardCache.metaAccounts.time < 15 * 60 * 1000) return dashboardCache.metaAccounts.data;
+
+    const token = encodeURIComponent(META_ACCESS_TOKEN);
+    const url = `https://graph.facebook.com/v23.0/me/adaccounts?fields=id,name,account_status&limit=200&access_token=${token}`;
+    const data = await dashboardFetchJson(url);
+    const accounts = (data.data || []).map(x => ({ id: dashboardNormalizeActId(x.id), name: x.name || x.id || "Tài khoản QC", status: x.account_status })).filter(x => x.id);
+    dashboardCache.metaAccounts = { time: now, data: accounts };
+    return accounts;
+}
+
+function dashboardAccountLabel(account = {}) {
+    const id = dashboardNormalizeActId(account.id || account.accountId || "");
+    const name = account.name && account.name !== id ? `${account.name} ` : "";
+    return `${name}${id}`.trim();
+}
+
+function dashboardLoadPaymentEvents() {
+    try {
+        if (!fs.existsSync(PAYMENT_EVENTS_FILE)) return [];
+        const raw = fs.readFileSync(PAYMENT_EVENTS_FILE, "utf8").trim();
+        if (!raw) return [];
+        const data = JSON.parse(raw);
+        return Array.isArray(data) ? data : [];
+    } catch (error) {
+        console.error("Load payment events error:", error);
+        return [];
+    }
+}
+
+function dashboardSavePaymentEvents(events) {
+    try {
+        fs.writeFileSync(PAYMENT_EVENTS_FILE, JSON.stringify(events.slice(-500), null, 2));
+    } catch (error) {
+        console.error("Save payment events error:", error);
+    }
+}
+
+function dashboardParsePaymentText(text = "", accountId = "") {
+    const input = String(text || "");
+    const cardMatch = input.match(/(?:Visa|Mastercard|Thẻ|Thẻ|card)?[^0-9]*(?:\d{4,6})?\D*(?:\.\.\.|\*{2,}|x{2,})\s*(\d{4})/i) || input.match(/(?:last4|card|visa)\D*(\d{4})/i);
+    const amountMatch = input.replace(/,/g, ".").match(/(\d{1,3}(?:[\.\s]\d{3})+|\d+)\s*(?:VND|đ|VNĐ)/i);
+    const dateTimeMatch = input.match(/(\d{1,2})[-\/](\d{1,2})[-\/](\d{4})(?:\s+(\d{1,2}):(\d{2})(?::(\d{2}))?)?/);
+    const cardLast4 = cardMatch ? cardMatch[1] : "";
+    let amount = 0;
+    if (amountMatch) amount = Number(String(amountMatch[1]).replace(/[^0-9]/g, "")) || 0;
+    let occurredAt = new Date().toISOString();
+    if (dateTimeMatch) {
+        const [, dd, mm, yyyy, hh = "00", min = "00", ss = "00"] = dateTimeMatch;
+        occurredAt = new Date(`${yyyy}-${String(mm).padStart(2,"0")}-${String(dd).padStart(2,"0")}T${String(hh).padStart(2,"0")}:${min}:${ss}+07:00`).toISOString();
+    }
+    return { cardLast4, amount, accountId: dashboardNormalizeActId(accountId), occurredAt, rawText: input, createdAt: new Date().toISOString() };
+}
+
+function dashboardPaymentCardForDate(dateKey, accountId = "") {
+    const events = dashboardLoadPaymentEvents();
+    const targetTs = new Date(`${dateKey}T23:59:59Z`).getTime();
+    const normalizedAccount = dashboardNormalizeActId(accountId);
+    const relevant = events
+        .filter(e => e.cardLast4 && (!normalizedAccount || !e.accountId || e.accountId === normalizedAccount))
+        .map(e => ({ ...e, ts: new Date(e.occurredAt || e.createdAt || 0).getTime() }))
+        .filter(e => !Number.isNaN(e.ts) && e.ts <= targetTs)
+        .sort((a, b) => b.ts - a.ts);
+    return relevant[0]?.cardLast4 || "";
+}
+
 async function dashboardFetchMetaAdsCached(dateRange) {
     const result = {
-        enabled: Boolean(META_ACCESS_TOKEN && META_AD_ACCOUNT_ID),
+        enabled: Boolean(META_ACCESS_TOKEN && (META_AD_ACCOUNT_ID || META_AD_ACCOUNT_IDS || META_AUTO_AD_ACCOUNTS)),
         error: null,
         fetchedAt: Date.now(),
         fromCache: false,
         ads: [],
         byId: {},
+        accounts: [],
         totalSpend: 0,
         rawTotalSpend: 0,
         dateRange
     };
 
     if (!result.enabled) {
-        result.error = "Thiếu META_ACCESS_TOKEN hoặc META_AD_ACCOUNT_ID";
+        result.error = "Thiếu META_ACCESS_TOKEN hoặc META_AD_ACCOUNT_ID/META_AD_ACCOUNT_IDS";
         return result;
     }
 
-    const account = String(META_AD_ACCOUNT_ID).startsWith("act_") ? META_AD_ACCOUNT_ID : `act_${META_AD_ACCOUNT_ID}`;
-    const key = `${account}:${dateRange.since}:${dateRange.until}:spend-positive-only`;
+    let accounts = [];
+    try {
+        accounts = await dashboardGetMetaAccounts();
+    } catch (error) {
+        result.error = `Không lấy được danh sách tài khoản QC: ${error.message}`;
+        return result;
+    }
+    if (!accounts.length) {
+        result.error = "Không có tài khoản quảng cáo nào để đọc. Hãy đặt META_AD_ACCOUNT_ID, META_AD_ACCOUNT_IDS hoặc META_AUTO_AD_ACCOUNTS=true";
+        return result;
+    }
+
+    const accountCardMap = dashboardParseAccountCardMap();
+    const accountKey = accounts.map(a => dashboardNormalizeActId(a.id)).join(",");
+    const key = `${accountKey}:${dateRange.since}:${dateRange.until}:multi-spend-positive:${META_SPEND_TAX_MULTIPLIER}`;
     const cached = dashboardCache.meta.get(key);
     const now = Date.now();
     if (cached && now - cached.time < DASHBOARD_META_CACHE_TTL) {
         return { ...cached.data, fetchedAt: cached.time, fromCache: true };
     }
 
-    try {
-        const token = encodeURIComponent(META_ACCESS_TOKEN);
-        const range = encodeURIComponent(JSON.stringify({ since: dateRange.since, until: dateRange.until }));
+    const token = encodeURIComponent(META_ACCESS_TOKEN);
+    const range = encodeURIComponent(JSON.stringify({ since: dateRange.since, until: dateRange.until }));
+    const byId = {};
+    let rawTotalSpend = 0;
+    const errors = [];
 
-        const adsUrl = `https://graph.facebook.com/v23.0/${account}/ads?fields=id,name,status,effective_status,configured_status,campaign{id,name},adset{id,name}&limit=500&access_token=${token}`;
-        const insightsUrl = `https://graph.facebook.com/v23.0/${account}/insights?level=ad&fields=ad_id,ad_name,spend,impressions,clicks,reach,cpc,cpm,ctr&time_range=${range}&limit=500&access_token=${token}`;
+    for (const accountInfo of accounts) {
+        const account = dashboardNormalizeActId(accountInfo.id);
+        if (!account) continue;
+        const accountName = accountInfo.name || account;
+        const cardLast4 = String(accountInfo.cardLast4 || accountCardMap[account] || META_CARD_LAST4 || "");
+        try {
+            const adsUrl = `https://graph.facebook.com/v23.0/${account}/ads?fields=id,name,status,effective_status,configured_status,campaign{id,name},adset{id,name}&limit=500&access_token=${token}`;
+            const insightsUrl = `https://graph.facebook.com/v23.0/${account}/insights?level=ad&fields=ad_id,ad_name,spend,impressions,clicks,reach,cpc,cpm,ctr&time_range=${range}&limit=500&access_token=${token}`;
 
-        const [adsData, insightsData] = await Promise.all([
-            dashboardFetchJson(adsUrl),
-            dashboardFetchJson(insightsUrl)
-        ]);
+            const [adsData, insightsData] = await Promise.all([
+                dashboardFetchJson(adsUrl),
+                dashboardFetchJson(insightsUrl)
+            ]);
 
-        const metaInfoById = {};
-        for (const ad of adsData.data || []) {
-            metaInfoById[String(ad.id)] = {
-                adId: String(ad.id),
-                name: ad.name || `QC ${ad.id}`,
-                status: ad.effective_status || ad.configured_status || ad.status || "UNKNOWN",
-                campaignName: ad.campaign?.name || "",
-                adsetName: ad.adset?.name || ""
-            };
+            const metaInfoById = {};
+            for (const ad of adsData.data || []) {
+                metaInfoById[String(ad.id)] = {
+                    adId: String(ad.id),
+                    name: ad.name || `QC ${ad.id}`,
+                    status: ad.effective_status || ad.configured_status || ad.status || "UNKNOWN",
+                    campaignName: ad.campaign?.name || "",
+                    adsetName: ad.adset?.name || ""
+                };
+            }
+
+            let accountSpend = 0;
+            for (const item of insightsData.data || []) {
+                const id = String(item.ad_id || "");
+                if (!id) continue;
+
+                const rawSpend = Number(item.spend || 0);
+                const spend = rawSpend * (Number.isFinite(META_SPEND_TAX_MULTIPLIER) && META_SPEND_TAX_MULTIPLIER > 0 ? META_SPEND_TAX_MULTIPLIER : 1);
+                rawTotalSpend += spend;
+                accountSpend += spend;
+                if (spend <= 0) continue;
+
+                const info = metaInfoById[id] || {};
+                const keyId = `${account}:${id}`;
+                byId[keyId] = {
+                    adId: id,
+                    accountId: account,
+                    accountName,
+                    accountLabel: dashboardAccountLabel({ id: account, name: accountName }),
+                    cardLast4,
+                    name: item.ad_name || info.name || `QC ${id}`,
+                    status: info.status || "UNKNOWN",
+                    campaignName: info.campaignName || "",
+                    adsetName: info.adsetName || "",
+                    spend,
+                    impressions: Number(item.impressions || 0),
+                    clicks: Number(item.clicks || 0),
+                    reach: Number(item.reach || 0),
+                    cpc: Number(item.cpc || 0),
+                    cpm: Number(item.cpm || 0),
+                    ctr: Number(item.ctr || 0)
+                };
+            }
+
+            result.accounts.push({ id: account, name: accountName, spend: accountSpend, cardLast4 });
+        } catch (error) {
+            console.error("Meta Ads dashboard account error:", account, error);
+            errors.push(`${account}: ${error.message}`);
+            result.accounts.push({ id: account, name: accountName, spend: 0, cardLast4, error: error.message });
         }
-
-        const byId = {};
-        let rawTotalSpend = 0;
-
-        for (const item of insightsData.data || []) {
-            const id = String(item.ad_id || "");
-            if (!id) continue;
-
-            const rawSpend = Number(item.spend || 0);
-            const spend = rawSpend * (Number.isFinite(META_SPEND_TAX_MULTIPLIER) && META_SPEND_TAX_MULTIPLIER > 0 ? META_SPEND_TAX_MULTIPLIER : 1);
-            rawTotalSpend += spend;
-
-            // Quy tắc báo cáo mới: chỉ hiển thị QC có chi tiêu trong khoảng đang chọn.
-            if (spend <= 0) continue;
-
-            const info = metaInfoById[id] || {};
-            byId[id] = {
-                adId: id,
-                name: item.ad_name || info.name || `QC ${id}`,
-                status: info.status || "UNKNOWN",
-                campaignName: info.campaignName || "",
-                adsetName: info.adsetName || "",
-                spend,
-                impressions: Number(item.impressions || 0),
-                clicks: Number(item.clicks || 0),
-                reach: Number(item.reach || 0),
-                cpc: Number(item.cpc || 0),
-                cpm: Number(item.cpm || 0),
-                ctr: Number(item.ctr || 0)
-            };
-        }
-
-        result.byId = byId;
-        result.ads = Object.values(byId).sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0));
-        result.rawTotalSpend = rawTotalSpend;
-        result.totalSpend = result.ads.reduce((sum, x) => sum + Number(x.spend || 0), 0);
-        dashboardCache.meta.set(key, { time: now, data: result });
-        return result;
-    } catch (error) {
-        console.error("Meta Ads dashboard error:", error);
-        result.error = error.message;
-        return result;
     }
+
+    result.byId = byId;
+    result.ads = Object.values(byId).sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0));
+    result.rawTotalSpend = rawTotalSpend;
+    result.totalSpend = result.ads.reduce((sum, x) => sum + Number(x.spend || 0), 0);
+    if (errors.length) result.error = errors.join(" | ");
+    dashboardCache.meta.set(key, { time: now, data: result });
+    return result;
 }
 
 async function dashboardFetchMetaDailyCached(dateRange) {
     const result = {
-        enabled: Boolean(META_ACCESS_TOKEN && META_AD_ACCOUNT_ID),
+        enabled: Boolean(META_ACCESS_TOKEN && (META_AD_ACCOUNT_ID || META_AD_ACCOUNT_IDS || META_AUTO_AD_ACCOUNTS)),
         error: null,
         fetchedAt: Date.now(),
         fromCache: false,
         rows: [],
         byDate: {},
+        accountByDate: {},
+        accounts: [],
         totalSpend: 0,
         dateRange
     };
 
     if (!result.enabled) {
-        result.error = "Thiếu META_ACCESS_TOKEN hoặc META_AD_ACCOUNT_ID";
+        result.error = "Thiếu META_ACCESS_TOKEN hoặc META_AD_ACCOUNT_ID/META_AD_ACCOUNT_IDS";
         return result;
     }
 
-    const account = String(META_AD_ACCOUNT_ID).startsWith("act_") ? META_AD_ACCOUNT_ID : `act_${META_AD_ACCOUNT_ID}`;
-    const key = `${account}:daily:${dateRange.since}:${dateRange.until}:${META_SPEND_TAX_MULTIPLIER}`;
+    let accounts = [];
+    try {
+        accounts = await dashboardGetMetaAccounts();
+    } catch (error) {
+        result.error = `Không lấy được danh sách tài khoản QC: ${error.message}`;
+        return result;
+    }
+    if (!accounts.length) {
+        result.error = "Không có tài khoản quảng cáo nào để đọc.";
+        return result;
+    }
+
+    const accountCardMap = dashboardParseAccountCardMap();
+    const accountKey = accounts.map(a => dashboardNormalizeActId(a.id)).join(",");
+    const key = `${accountKey}:daily:${dateRange.since}:${dateRange.until}:${META_SPEND_TAX_MULTIPLIER}`;
     const cached = dashboardCache.metaDaily.get(key);
     const now = Date.now();
     if (cached && now - cached.time < DASHBOARD_META_CACHE_TTL) {
         return { ...cached.data, fetchedAt: cached.time, fromCache: true };
     }
 
-    try {
-        const token = encodeURIComponent(META_ACCESS_TOKEN);
-        const range = encodeURIComponent(JSON.stringify({ since: dateRange.since, until: dateRange.until }));
-        const url = `https://graph.facebook.com/v23.0/${account}/insights?fields=spend,date_start,date_stop&time_increment=1&time_range=${range}&limit=500&access_token=${token}`;
-        const data = await dashboardFetchJson(url);
-        const byDate = {};
-        for (const item of data.data || []) {
-            const day = String(item.date_start || "");
-            if (!day) continue;
-            const rawSpend = Number(item.spend || 0);
-            const spend = rawSpend * (Number.isFinite(META_SPEND_TAX_MULTIPLIER) && META_SPEND_TAX_MULTIPLIER > 0 ? META_SPEND_TAX_MULTIPLIER : 1);
-            byDate[day] = (byDate[day] || 0) + spend;
+    const token = encodeURIComponent(META_ACCESS_TOKEN);
+    const range = encodeURIComponent(JSON.stringify({ since: dateRange.since, until: dateRange.until }));
+    const byDate = {};
+    const accountByDate = {};
+    const errors = [];
+
+    for (const accountInfo of accounts) {
+        const account = dashboardNormalizeActId(accountInfo.id);
+        if (!account) continue;
+        const accountName = accountInfo.name || account;
+        const cardLast4 = String(accountInfo.cardLast4 || accountCardMap[account] || META_CARD_LAST4 || "");
+        try {
+            const url = `https://graph.facebook.com/v23.0/${account}/insights?fields=spend,date_start,date_stop&time_increment=1&time_range=${range}&limit=500&access_token=${token}`;
+            const data = await dashboardFetchJson(url);
+            let accountTotal = 0;
+            for (const item of data.data || []) {
+                const day = String(item.date_start || "");
+                if (!day) continue;
+                const rawSpend = Number(item.spend || 0);
+                const spend = rawSpend * (Number.isFinite(META_SPEND_TAX_MULTIPLIER) && META_SPEND_TAX_MULTIPLIER > 0 ? META_SPEND_TAX_MULTIPLIER : 1);
+                byDate[day] = (byDate[day] || 0) + spend;
+                if (!accountByDate[day]) accountByDate[day] = [];
+                accountByDate[day].push({ accountId: account, accountName, accountLabel: dashboardAccountLabel({ id: account, name: accountName }), spend, cardLast4 });
+                accountTotal += spend;
+            }
+            result.accounts.push({ id: account, name: accountName, spend: accountTotal, cardLast4 });
+        } catch (error) {
+            console.error("Meta daily dashboard account error:", account, error);
+            errors.push(`${account}: ${error.message}`);
+            result.accounts.push({ id: account, name: accountName, spend: 0, cardLast4, error: error.message });
         }
-        result.byDate = byDate;
-        result.rows = Object.entries(byDate).map(([date, spend]) => ({ date, spend })).sort((a, b) => a.date.localeCompare(b.date));
-        result.totalSpend = result.rows.reduce((sum, x) => sum + Number(x.spend || 0), 0);
-        dashboardCache.metaDaily.set(key, { time: now, data: result });
-        return result;
-    } catch (error) {
-        console.error("Meta daily dashboard error:", error);
-        result.error = error.message;
-        return result;
     }
+
+    result.byDate = byDate;
+    result.accountByDate = accountByDate;
+    result.rows = Object.entries(byDate).map(([date, spend]) => ({ date, spend, accounts: accountByDate[date] || [] })).sort((a, b) => a.date.localeCompare(b.date));
+    result.totalSpend = result.rows.reduce((sum, x) => sum + Number(x.spend || 0), 0);
+    if (errors.length) result.error = errors.join(" | ");
+    dashboardCache.metaDaily.set(key, { time: now, data: result });
+    return result;
+}
+
+function dashboardFormatAccountSpendList(accounts = []) {
+    const active = (accounts || []).filter(x => Number(x.spend || 0) > 0);
+    if (!active.length) return "";
+    return active
+        .sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0))
+        .map(x => `${x.accountLabel || dashboardAccountLabel(x)}: ${dashboardMoney(x.spend)}`)
+        .join(" | ");
+}
+
+function dashboardCardsForDate(dateKey, accounts = []) {
+    const cards = new Set();
+    for (const acc of accounts || []) {
+        const fromPayment = dashboardPaymentCardForDate(dateKey, acc.accountId || acc.id || "");
+        const card = fromPayment || acc.cardLast4 || "";
+        if (card) cards.add(card);
+    }
+    if (!cards.size) {
+        const fallbackPayment = dashboardPaymentCardForDate(dateKey, "");
+        if (fallbackPayment) cards.add(fallbackPayment);
+        else if (META_CARD_LAST4) cards.add(META_CARD_LAST4);
+    }
+    return Array.from(cards).join(", ");
 }
 
 function dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey) {
@@ -2719,7 +2926,17 @@ function dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey) {
 
     for (let i = 1; i <= days; i++) {
         const day = `${targetMonth}-${String(i).padStart(2, "0")}`;
-        byDate[day] = { date: day, spend: Number(metaDaily?.byDate?.[day] || 0), total: 0, hasPhone: 0, zalo: 0, visa: META_CARD_LAST4 };
+        const accounts = metaDaily?.accountByDate?.[day] || [];
+        byDate[day] = {
+            date: day,
+            spend: Number(metaDaily?.byDate?.[day] || 0),
+            accountSpendText: dashboardFormatAccountSpendList(accounts),
+            accounts,
+            total: 0,
+            hasPhone: 0,
+            zalo: 0,
+            visa: dashboardCardsForDate(day, accounts)
+        };
     }
 
     for (const item of report) {
@@ -2736,13 +2953,24 @@ function dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey) {
         rows.push(byDate[day]);
     }
 
+    const totalAccountMap = {};
+    for (const row of rows) {
+        for (const acc of row.accounts || []) {
+            const id = acc.accountId || acc.id || "unknown";
+            if (!totalAccountMap[id]) totalAccountMap[id] = { ...acc, spend: 0 };
+            totalAccountMap[id].spend += Number(acc.spend || 0);
+        }
+    }
+
     const totalRow = rows.reduce((acc, x) => {
         acc.spend += Number(x.spend || 0);
         acc.total += Number(x.total || 0);
         acc.hasPhone += Number(x.hasPhone || 0);
         acc.zalo += Number(x.zalo || 0);
         return acc;
-    }, { date: `Tổng tháng ${targetMonth}`, spend: 0, total: 0, hasPhone: 0, zalo: 0, visa: META_CARD_LAST4, isTotal: true });
+    }, { date: `Tổng tháng ${targetMonth}`, spend: 0, total: 0, hasPhone: 0, zalo: 0, visa: "", isTotal: true, accountSpendText: "" });
+    totalRow.accountSpendText = dashboardFormatAccountSpendList(Object.values(totalAccountMap));
+    totalRow.visa = dashboardCardsForDate(todayMeta, Object.values(totalAccountMap));
 
     return { rows, totalRow, days, lastDay, targetMonth };
 }
@@ -2757,6 +2985,7 @@ function dashboardRenderMetaMonthHtml({ limit, fullTotal, report, pancakeMeta, m
             <td>${x.isTotal ? '<b>Tổng</b>' : index}</td>
             <td><b>${dashboardEscapeHtml(x.date)}</b></td>
             <td><b>${dashboardMoney(x.spend)}</b></td>
+            <td>${dashboardEscapeHtml(x.accountSpendText || "")}</td>
             <td>${x.total}</td>
             <td><b>${x.hasPhone}</b><br><span>${dashboardRate(x.hasPhone, x.total)}%</span></td>
             <td>${x.zalo}</td>
@@ -2765,11 +2994,11 @@ function dashboardRenderMetaMonthHtml({ limit, fullTotal, report, pancakeMeta, m
     `).join("");
 
     return `<!doctype html><html lang="vi"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Báo cáo tháng theo giờ Meta</title><style>
-        body{margin:0;font-family:"Times New Roman",Times,serif;background:#f8fafc;color:#111827}.wrap{max-width:1280px;margin:0 auto;padding:18px}.header{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}.header h1{margin:0;font-size:28px}.header p{margin:6px 0 0;color:#64748b}.btns a{display:inline-block;margin-left:8px;padding:10px 12px;border-radius:10px;background:#2563eb;color:white;text-decoration:none}.btns a.green{background:#16a34a}.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;background:white;padding:14px;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin-bottom:14px;border:1px solid #e2e8f0}.filter label{display:block;font-size:13px;color:#64748b;margin-bottom:5px}.filter input,.filter select{width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-family:"Times New Roman",Times,serif}.notice{background:#fff7ed;border:1px solid #fed7aa;padding:12px;border-radius:12px;margin:12px 0;color:#9a3412}.red-note{background:#fef2f2;border-color:#fecaca;color:#991b1b}.table-wrap{overflow-x:auto;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);border:1px solid #e2e8f0}table{width:100%;border-collapse:collapse;background:white;min-width:900px}th,td{padding:12px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}th{background:#e0f2fe;font-weight:800;position:sticky;top:0}td span{color:#64748b;font-size:13px}tbody tr:nth-child(even){background:#f8fafc}.row-total{background:#dcfce7!important;font-size:16px}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}.card{background:white;border-radius:16px;padding:16px;border:1px solid #e2e8f0;box-shadow:0 1px 4px rgba(15,23,42,.08)}.card .label{color:#475569}.card .num{font-size:28px;font-weight:800;margin-top:8px}@media(max-width:900px){.header{display:block}.btns{margin-top:12px}.btns a{margin:4px 4px 0 0}.filters,.summary{grid-template-columns:1fr}th,td{font-size:12px;padding:9px}}
+        body{margin:0;font-family:"Times New Roman",Times,serif;background:#f8fafc;color:#111827}.wrap{max-width:1280px;margin:0 auto;padding:18px}.header{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}.header h1{margin:0;font-size:28px}.header p{margin:6px 0 0;color:#64748b}.btns a{display:inline-block;margin-left:8px;padding:10px 12px;border-radius:10px;background:#2563eb;color:white;text-decoration:none}.btns a.green{background:#16a34a}.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;background:white;padding:14px;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin-bottom:14px;border:1px solid #e2e8f0}.filter label{display:block;font-size:13px;color:#64748b;margin-bottom:5px}.filter input,.filter select{width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-family:"Times New Roman",Times,serif}.notice{background:#fff7ed;border:1px solid #fed7aa;padding:12px;border-radius:12px;margin:12px 0;color:#9a3412}.red-note{background:#fef2f2;border-color:#fecaca;color:#991b1b}.table-wrap{overflow-x:auto;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);border:1px solid #e2e8f0}table{width:100%;border-collapse:collapse;background:white;min-width:1100px}th,td{padding:12px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}th{background:#e0f2fe;font-weight:800;position:sticky;top:0}td span{color:#64748b;font-size:13px}tbody tr:nth-child(even){background:#f8fafc}.row-total{background:#dcfce7!important;font-size:16px}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}.card{background:white;border-radius:16px;padding:16px;border:1px solid #e2e8f0;box-shadow:0 1px 4px rgba(15,23,42,.08)}.card .label{color:#475569}.card .num{font-size:28px;font-weight:800;margin-top:8px}@media(max-width:900px){.header{display:block}.btns{margin-top:12px}.btns a{margin:4px 4px 0 0}.filters,.summary{grid-template-columns:1fr}th,td{font-size:12px;padding:9px}}
     </style></head><body><div class="wrap"><div class="header"><div><h1>📅 Báo cáo tháng theo giờ tài khoản quảng cáo</h1><p>Tháng ${dashboardEscapeHtml(monthData.targetMonth)} | Múi giờ Meta: ${dashboardEscapeHtml(META_ACCOUNT_TIMEZONE)} | Reset khoảng 14h giờ VN nếu tài khoản dùng giờ Hoa Kỳ</p><p>Đã lấy ${fullTotal}/${limit} hội thoại Pancake | Pancake: ${dashboardEscapeHtml(pancakeTime)} ${pancakeMeta?.fromCache ? "(cache)" : "(mới)"} | Meta: ${dashboardEscapeHtml(metaTime)} ${metaDaily?.fromCache ? "(cache)" : "(mới)"}</p></div><div class="btns"><a class="green" href="/dashboard-meta-month?limit=${limit}">Tháng hiện tại</a><a href="/dashboard-today?time_basis=meta&limit=${limit}">Dashboard giờ Meta</a><a href="/dashboard-today?time_basis=pancake&limit=${limit}">Dashboard giờ VN</a></div></div>
-    <div class="filters"><div class="filter"><label>Số hội thoại lấy từ Pancake</label><select id="limitSelect" onchange="applyMonthFilters()"><option value="100" ${dashboardSelected("100", String(limit))}>100</option><option value="200" ${dashboardSelected("200", String(limit))}>200</option><option value="300" ${dashboardSelected("300", String(limit))}>300</option><option value="500" ${dashboardSelected("500", String(limit))}>500</option></select></div><div class="filter"><label>Tháng theo giờ Meta</label><input id="monthInput" type="month" value="${dashboardEscapeHtml(monthData.targetMonth)}" onchange="applyMonthFilters()"/></div><div class="filter"><label>Ghi chú</label><input value="Chi tiêu đã nhân hệ số thuế: ${dashboardEscapeHtml(String(META_SPEND_TAX_MULTIPLIER || 1))}" readonly/></div></div>${metaNotice}<div class="notice">Bảng này gom ngày theo <b>giờ tài khoản quảng cáo</b>, không theo giờ Việt Nam. Cột chi tiêu lấy từ Meta Insights; nếu cần cộng thuế, đặt biến Render <b>META_SPEND_TAX_MULTIPLIER</b>. Cột Visa lấy từ <b>META_CARD_LAST4</b>, nếu không đặt sẽ để trống.</div>
+    <div class="filters"><div class="filter"><label>Số hội thoại lấy từ Pancake</label><select id="limitSelect" onchange="applyMonthFilters()"><option value="100" ${dashboardSelected("100", String(limit))}>100</option><option value="200" ${dashboardSelected("200", String(limit))}>200</option><option value="300" ${dashboardSelected("300", String(limit))}>300</option><option value="500" ${dashboardSelected("500", String(limit))}>500</option></select></div><div class="filter"><label>Tháng theo giờ Meta</label><input id="monthInput" type="month" value="${dashboardEscapeHtml(monthData.targetMonth)}" onchange="applyMonthFilters()"/></div><div class="filter"><label>Ghi chú</label><input value="Chi tiêu đã nhân hệ số thuế: ${dashboardEscapeHtml(String(META_SPEND_TAX_MULTIPLIER || 1))}" readonly/></div></div>${metaNotice}<div class="notice">Bảng này gom ngày theo <b>giờ tài khoản quảng cáo</b>, không theo giờ Việt Nam. Cột chi tiêu lấy từ Meta Insights; nếu cần cộng thuế, đặt biến Render <b>META_SPEND_TAX_MULTIPLIER</b>. Cột tài khoản QC gom từ <b>META_AD_ACCOUNT_IDS</b> hoặc <b>META_AUTO_AD_ACCOUNTS=true</b>. Cột Visa ưu tiên dữ liệu thanh toán tự động từ <b>/payment-webhook</b>, sau đó tới <b>META_ACCOUNT_CARD_MAP</b> hoặc <b>META_CARD_LAST4</b>.</div>
     <div class="summary"><div class="card"><div class="label">Tổng chi tiêu tháng</div><div class="num">${dashboardMoney(monthData.totalRow.spend)}</div></div><div class="card"><div class="label">Tổng tin nhắn</div><div class="num">${monthData.totalRow.total}</div></div><div class="card"><div class="label">Tổng SĐT</div><div class="num">${monthData.totalRow.hasPhone}</div></div><div class="card"><div class="label">Tỷ lệ lấy số</div><div class="num">${dashboardRate(monthData.totalRow.hasPhone, monthData.totalRow.total)}%</div></div></div>
-    <div class="table-wrap"><table><thead><tr><th>#</th><th>Ngày tháng theo giờ Meta</th><th>Tổng chi tiêu trong ngày đã gồm thuế</th><th>Số tin nhắn trong ngày</th><th>Số lượng SĐT</th><th>Số lượng Zalo</th><th>Thẻ Visa</th></tr></thead><tbody>${rowHtml}</tbody></table></div></div><script>function applyMonthFilters(){const limit=document.getElementById('limitSelect').value;const month=document.getElementById('monthInput').value;const p=new URLSearchParams();p.set('limit',limit);if(month)p.set('month',month);window.location.href='/dashboard-meta-month?'+p.toString();}</script></body></html>`;
+    <div class="table-wrap"><table><thead><tr><th>#</th><th>Ngày tháng theo giờ Meta</th><th>Tổng chi tiêu trong ngày đã gồm thuế</th><th>Tài khoản QC đang chạy / chi tiêu theo TK</th><th>Số tin nhắn trong ngày</th><th>Số lượng SĐT</th><th>Số lượng Zalo</th><th>Thẻ Visa</th></tr></thead><tbody>${rowHtml}</tbody></table></div></div><script>function applyMonthFilters(){const limit=document.getElementById('limitSelect').value;const month=document.getElementById('monthInput').value;const p=new URLSearchParams();p.set('limit',limit);if(month)p.set('month',month);window.location.href='/dashboard-meta-month?'+p.toString();}</script></body></html>`;
 }
 
 function dashboardAdRowClass(row) {
@@ -2787,6 +3016,10 @@ function dashboardBuildAdStats(report, metaData) {
     for (const ad of metaData?.ads || []) {
         map[String(ad.adId)] = {
             adId: String(ad.adId),
+            accountId: ad.accountId || "",
+            accountName: ad.accountName || "",
+            accountLabel: ad.accountLabel || "",
+            cardLast4: ad.cardLast4 || "",
             name: ad.name || `QC ${ad.adId}`,
             status: ad.status || "UNKNOWN",
             campaignName: ad.campaignName || "",
@@ -2856,6 +3089,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         <tr class="${dashboardAdRowClass(x)}">
             <td>${index + 1}</td>
             <td><b>${dashboardEscapeHtml(x.name)}</b><br><span>${dashboardEscapeHtml(x.adId)}</span><br><span>${dashboardEscapeHtml(x.campaignName || "")}</span></td>
+            <td>${dashboardEscapeHtml(x.accountLabel || x.accountId || "")}</td>
             <td><span class="status">${dashboardEscapeHtml(x.status)}</span></td>
             <td><b>${dashboardMoney(x.spend)}</b></td>
             <td><b>${x.total}</b></td>
@@ -2997,7 +3231,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         <div class="advanced-box" id="advancedBox"><b>📈 Chỉ số nâng cao:</b><label><input type="checkbox" data-col="adv-cpcv" onchange="toggleAdvancedColumns()"> Cost/Hội thoại</label><label><input type="checkbox" data-col="adv-cpps" onchange="toggleAdvancedColumns()"> Cost/SĐT</label><label><input type="checkbox" data-col="adv-cpc" onchange="toggleAdvancedColumns()"> CPC</label><label><input type="checkbox" data-col="adv-cpm" onchange="toggleAdvancedColumns()"> CPM</label><label><input type="checkbox" data-col="adv-ctr" onchange="toggleAdvancedColumns()"> CTR</label></div>
         <button class="toggle-btn" onclick="toggleAdvancedBox()">📈 Chỉ số nâng cao ▶</button>
         <div class="legend"><span class="chip good">Xanh: tỷ lệ SĐT ≥35%</span><span class="chip mid">Vàng: 20%-34.9%</span><span class="chip low">Hồng: dưới 20%</span></div>
-        <div class="table-wrap" id="adsTableWrap"><table><thead><tr><th>#</th><th>Quảng cáo</th><th>Trạng thái</th><th>Chi tiêu</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng</th><th>Nhân viên</th><th>Tags</th><th>Sản phẩm</th><th class="adv adv-cpcv">Cost/Hội thoại</th><th class="adv adv-cpps">Cost/SĐT</th><th class="adv adv-cpc">CPC</th><th class="adv adv-cpm">CPM</th><th class="adv adv-ctr">CTR</th></tr></thead><tbody>${adsRows || `<tr><td colspan="18">Không có quảng cáo nào tiêu tiền trong khoảng này hoặc Meta API chưa trả dữ liệu.</td></tr>`}</tbody></table></div>
+        <div class="table-wrap" id="adsTableWrap"><table><thead><tr><th>#</th><th>Quảng cáo</th><th>Tài khoản QC</th><th>Trạng thái</th><th>Chi tiêu</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng</th><th>Nhân viên</th><th>Tags</th><th>Sản phẩm</th><th class="adv adv-cpcv">Cost/Hội thoại</th><th class="adv adv-cpps">Cost/SĐT</th><th class="adv adv-cpc">CPC</th><th class="adv adv-cpm">CPM</th><th class="adv adv-ctr">CTR</th></tr></thead><tbody>${adsRows || `<tr><td colspan="19">Không có quảng cáo nào tiêu tiền trong khoảng này hoặc Meta API chưa trả dữ liệu.</td></tr>`}</tbody></table></div>
     </div>
 
     <div class="section"><h2>Phân loại sản phẩm</h2><div class="products"><div class="product">Quạt <b>${stats.productCount.quat}</b></div><div class="product">Thiết bị vệ sinh <b>${stats.productCount.thietBiVeSinh}</b></div><div class="product">Combo phòng tắm <b>${stats.productCount.comboPhongTam}</b></div><div class="product">Bếp <b>${stats.productCount.bep}</b></div><div class="product">Bồn tắm <b>${stats.productCount.bonTam}</b></div><div class="product">Khác <b>${stats.productCount.khac}</b></div></div></div>
@@ -3084,6 +3318,28 @@ app.get('/dashboard-meta-month', async (req, res) => {
         console.error("Meta month dashboard error:", error);
         res.status(500).type('text/plain').send(`Lỗi khi mở báo cáo tháng Meta: ${error.message}`);
     }
+});
+
+app.post('/payment-webhook', (req, res) => {
+    try {
+        const text = req.body?.text || req.body?.message || req.body?.sms || "";
+        const accountId = req.body?.account_id || req.body?.accountId || "";
+        const event = dashboardParsePaymentText(text, accountId);
+        if (!event.cardLast4) {
+            return res.status(400).json({ success: false, error: "Không đọc được 4 số cuối thẻ từ nội dung gửi lên", parsed: event });
+        }
+        const events = dashboardLoadPaymentEvents();
+        events.push(event);
+        dashboardSavePaymentEvents(events);
+        res.json({ success: true, event });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/payment-debug', (req, res) => {
+    const events = dashboardLoadPaymentEvents().slice(-50).reverse();
+    res.json({ success: true, count: events.length, events });
 });
 
 app.get('/meta-debug', async (req, res) => {
