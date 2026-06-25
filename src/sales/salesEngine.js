@@ -46,13 +46,28 @@ function buildFollowUpMessage(productType) {
         return "Dạ em nhắn lại về bộ thiết bị vệ sinh/phòng tắm anh xem trước đó ạ. Bên em có combo phối sẵn và combo tự chọn theo ngân sách. Anh muốn em gợi ý thêm nhóm mẫu phổ thông hay đẹp hơn một chút ạ?";
     }
 
+    if (productType === "kitchen" || productType === "kitchen_bath") {
+        return "Dạ em nhắn lại về nhóm thiết bị bếp/phòng tắm anh xem trước đó ạ. Nếu anh vẫn cần, em có thể gửi thêm mẫu theo ngân sách để anh tham khảo ngay tại đây. Anh muốn xem thêm nhóm nào trước ạ?";
+    }
+
     return null;
 }
 
-function detectProductType(customerMessage, historyText) {
-    const msg = (customerMessage || "").toLowerCase();
-    const history = (historyText || "").toLowerCase();
-    const combined = `${msg} ${history}`;
+function detectExplicitTopic(message) {
+    const msg = (message || "").toLowerCase();
+
+    const fanWords = [
+        "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
+        "guka", "5 cánh", "5 canh", "8 cánh", "8 canh", "10 cánh", "10 canh",
+        "55w", "65w", "70w", "90w", "đèn không", "den khong", "đèn nhẹ", "den nhe",
+        "không lòe", "khong loe"
+    ];
+
+    const kitchenWords = [
+        "bếp", "bep", "thiết bị bếp", "thiet bi bep",
+        "bếp từ", "bep tu", "hút mùi", "hut mui", "máy hút mùi", "may hut mui",
+        "chậu rửa bát", "chau rua bat", "vòi bếp", "voi bep", "tủ bếp", "tu bep"
+    ];
 
     const faucetWords = [
         "lavabo", "chậu lavabo", "chau lavabo",
@@ -64,38 +79,47 @@ function detectProductType(customerMessage, historyText) {
     const bathWords = [
         "combo", "phòng tắm", "phong tam", "nhà tắm", "nha tam",
         "nhà vệ sinh", "nha ve sinh", "thiết bị vệ sinh", "thiet bi ve sinh",
-        "bồn cầu", "bon cau", "bồn tắm", "bon tam", "bếp", "bep", "gạch", "gach"
+        "tbvs", "bồn cầu", "bon cau", "bồn tắm", "bon tam", "gạch", "gach"
     ];
 
-    const fanWords = [
-        "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
-        "5 cánh", "8 cánh", "10 cánh", "55w", "65w", "70w", "90w",
-        "cho xem quạt", "xem quạt", "gửi quạt", "gui quat", "xin quạt", "xin quat"
-    ];
+    const hasKitchen = kitchenWords.some(word => msg.includes(word));
+    const hasBath = bathWords.some(word => msg.includes(word));
+    const hasFan = fanWords.some(word => msg.includes(word));
+    const hasFaucet = faucetWords.some(word => msg.includes(word));
 
-    // Ưu tiên tin nhắn mới trước để khách đổi chủ đề vẫn đúng
-    if (faucetWords.some(word => msg.includes(word))) return "faucet";
-    if (bathWords.some(word => msg.includes(word))) return "combo";
-    if (fanWords.some(word => msg.includes(word))) return "fan";
+    if (hasKitchen && hasBath) return "kitchen_bath";
+
+    // Ưu tiên sản phẩm cụ thể khi khách hỏi rõ
+    if (hasFan) return "fan";
+    if (hasKitchen) return "kitchen";
+    if (hasFaucet) return "faucet";
+    if (hasBath) return "combo";
+
+    return null;
+}
+
+function detectProductType(customerMessage, historyText) {
+    const msg = (customerMessage || "").toLowerCase();
+    const history = (historyText || "").toLowerCase();
+
+    const explicit = detectExplicitTopic(msg);
+    if (explicit) return explicit;
 
     const askImageWords = [
         "gửi ảnh", "gui anh", "xin ảnh", "xin anh",
         "xem ảnh", "xem anh", "cho ảnh", "cho anh",
         "xem mẫu", "xem mau", "cho xem", "gửi mẫu", "gui mau",
-        "xin mẫu", "xin mau", "cho mẫu", "cho mau", "xem"
+        "xin mẫu", "xin mau", "cho mẫu", "cho mau", "xem",
+        "catalog", "catalogue", "hình", "hinh", "báo giá", "bao gia"
     ];
 
-    const isAskingImage = askImageWords.some(word => msg.includes(word));
+    const isAsking = askImageWords.some(word => msg.includes(word)) || !msg.trim();
 
-    if (isAskingImage || !msg.trim()) {
-        if (faucetWords.some(word => history.includes(word))) return "faucet";
-        if (bathWords.some(word => history.includes(word))) return "combo";
-        if (fanWords.some(word => history.includes(word))) return "fan";
+    // Nếu khách chỉ nói "cho xem thêm", "báo giá", "không nghe máy"... thì dùng lịch sử/chủ đề cũ
+    if (isAsking) {
+        const fromHistory = detectExplicitTopic(history);
+        if (fromHistory) return fromHistory;
     }
-
-    if (faucetWords.some(word => combined.includes(word))) return "faucet";
-    if (bathWords.some(word => combined.includes(word))) return "combo";
-    if (fanWords.some(word => combined.includes(word))) return "fan";
 
     return null;
 }
@@ -103,8 +127,8 @@ function detectProductType(customerMessage, historyText) {
 function shouldSendCarousel(customerMessage) {
     const msg = (customerMessage || "").toLowerCase();
 
-    // Gửi carousel khi khách hỏi mẫu/ảnh/giá của một nhóm sản phẩm cụ thể.
-    // Không dùng từ đơn "anh" vì dễ nhầm với đại từ xưng hô.
+    // Chỉ kích hoạt carousel khi khách thật sự xin ảnh/mẫu/catalog.
+    // Không dùng từ đơn "anh" hoặc "ảnh" vì rất dễ nhầm với đại từ xưng hô.
     const words = [
         "gửi ảnh", "gui anh",
         "xin ảnh", "xin anh",
@@ -116,41 +140,95 @@ function shouldSendCarousel(customerMessage) {
         "cho mẫu", "cho mau",
         "gửi các mẫu", "gui cac mau",
         "gửi mẫu và giá", "gui mau va gia",
-        "mẫu quạt", "mau quat",
-        "mẫu 8 cánh", "mau 8 canh",
-        "mẫu 10 cánh", "mau 10 canh",
-        "xin giá", "xin gia",
-        "báo giá", "bao gia",
-        "giá quạt", "gia quat",
-        "giá mẫu", "gia mau",
-        "giá này", "gia nay",
-        "quạt này", "quat nay",
-        "8 cánh", "8 canh",
-        "10 cánh", "10 canh",
-        "combo này", "combo nay",
-
-        // Các câu khách hay dùng khi muốn xem mẫu/hình nhưng không nói đúng từ khóa cũ
-        "mẫu", "mau",
-        "mẫu nào", "mau nao",
-        "mẫu đẹp", "mau dep",
-        "mẫu khác", "mau khac",
-        "có mẫu khác", "co mau khac",
-        "xem thêm", "xem them",
         "xem thêm mẫu", "xem them mau",
-        "tham khảo", "tham khao",
         "catalog", "catalogue",
-        "hình", "hinh",
+        "hình ảnh", "hinh anh",
         "hình thật", "hinh that",
         "ảnh thật", "anh that",
         "hình thực tế", "hinh thuc te",
         "ảnh thực tế", "anh thuc te",
-
-        // Khi khách gửi ảnh/tệp, getCustomerMessageFromEvent sẽ tạo câu này
         "khách vừa gửi", "khach vua gui",
         "cần tư vấn mẫu này", "can tu van mau nay"
     ];
 
     return words.some(word => msg.includes(word));
+}
+
+function isDontCallMessage(message) {
+    const msg = (message || "").toLowerCase();
+
+    return [
+        "không nghe", "khong nghe", "ko nghe", "k nghe",
+        "không tiện nghe", "khong tien nghe", "không tiện gọi", "khong tien goi",
+        "đang làm", "dang lam", "đang bận", "dang ban", "bận", "ban",
+        "shop ồn", "ồn không nghe", "on khong nghe",
+        "nhắn ở đây", "nhan o day", "gửi qua đây", "gui qua day",
+        "nhắn qua đây", "nhan qua day", "messenger", "inbox"
+    ].some(word => msg.includes(word));
+}
+
+function buildDontCallReply(productType) {
+    if (productType === "fan") {
+        return "Dạ không sao anh, em tư vấn luôn qua Messenger cho tiện ạ. Với quạt đèn không lòe loẹt, anh nên chọn mẫu ánh sáng vàng nhẹ hoặc trung tính, kiểu hiện đại đơn giản. Anh muốn em gửi vài mẫu quạt đúng kiểu đó bên dưới không ạ?";
+    }
+
+    if (productType === "faucet") {
+        return "Dạ không sao anh, em tư vấn qua Messenger cũng được ạ. Với sen vòi/lavabo/chậu rửa, anh muốn xem mẫu cơ bản dễ dùng hay mẫu đẹp đồng bộ hơn để em gửi đúng nhóm ạ?";
+    }
+
+    if (productType === "combo") {
+        return "Dạ không sao anh, em tư vấn qua Messenger cũng được ạ. Với thiết bị vệ sinh/phòng tắm, bên em có combo cơ bản, trung cấp và cao cấp. Anh muốn xem mẫu theo tầm giá nào để em gửi đúng hơn ạ?";
+    }
+
+    if (productType === "kitchen" || productType === "kitchen_bath") {
+        return "Dạ không sao anh, em tư vấn qua Messenger cũng được ạ. Anh muốn xem mẫu bếp, chậu rửa hay combo phòng tắm để em gửi đúng nhóm ạ?";
+    }
+
+    return "Dạ không sao anh, em tư vấn qua Messenger cũng được ạ. Anh đang muốn xem thêm mẫu hoặc báo giá nhóm sản phẩm nào để em gửi đúng hơn ạ?";
+}
+
+function buildCarouselIntro(productType) {
+    if (productType === "fan") {
+        return "Dạ em gửi anh một số mẫu quạt bán chạy bên dưới để anh tham khảo nhé.";
+    }
+
+    if (productType === "faucet") {
+        return "Dạ em gửi anh một số mẫu sen vòi, lavabo, chậu rửa phổ biến bên dưới để anh tham khảo nhé.";
+    }
+
+    if (productType === "combo") {
+        return "Dạ em gửi anh một số mẫu combo thiết bị vệ sinh/phòng tắm phổ biến bên dưới để anh tham khảo nhé.";
+    }
+
+    if (productType === "kitchen") {
+        return "Dạ em gửi anh một số mẫu thiết bị bếp, chậu rửa, vòi bếp bên dưới để anh tham khảo nhé.";
+    }
+
+    if (productType === "kitchen_bath") {
+        return "Dạ em gửi anh một số mẫu cho cả khu bếp và phòng tắm bên dưới để anh tham khảo nhé.";
+    }
+
+    return "Dạ em gửi anh một số mẫu bán chạy bên dưới để anh tham khảo nhé.";
+}
+
+function buildCarouselClose(productType) {
+    if (productType === "fan") {
+        return "Đây là một số mẫu quạt phổ biến bên em ạ. Nếu anh cần nhiều mẫu hơn, màu khác, bản động cơ Nhật/Ý hoặc báo giá chi tiết, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn kỹ hơn nhé?";
+    }
+
+    if (productType === "faucet") {
+        return "Đây là một số mẫu sen vòi, lavabo, chậu rửa phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác hoặc báo giá chi tiết theo bộ, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
+    }
+
+    if (productType === "combo") {
+        return "Đây là một số combo thiết bị vệ sinh/phòng tắm phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác, phối theo ngân sách hoặc báo giá chi tiết, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
+    }
+
+    if (productType === "kitchen" || productType === "kitchen_bath") {
+        return "Đây là một số mẫu phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác hoặc báo giá chi tiết theo bộ, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
+    }
+
+    return "Đây là một số mẫu phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác hoặc báo giá chi tiết, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
 }
 
 function getCustomerMessageFromEvent(event) {
@@ -242,6 +320,11 @@ module.exports = {
     buildFollowUpMessage,
     detectProductType,
     shouldSendCarousel,
+    detectExplicitTopic,
+    isDontCallMessage,
+    buildDontCallReply,
+    buildCarouselIntro,
+    buildCarouselClose,
     getCustomerMessageFromEvent,
     normalizeText,
     detectIntent,

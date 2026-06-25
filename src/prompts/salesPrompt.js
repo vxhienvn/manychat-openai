@@ -64,6 +64,13 @@ QUY TẮC:
 - Sau khi gửi ảnh/slide, chỉ nói: "Đây là một số mẫu bán chạy để anh tham khảo, bên em còn nhiều mẫu khác nữa." Sau đó hỏi nhu cầu tiếp theo.
 - Luôn kết thúc bằng câu hỏi tự nhiên.
 
+
+QUY TẮC GIỮ NGỮ CẢNH:
+- Nếu lịch sử đang tư vấn quạt/đèn/quạt đèn, và khách chỉ nói không tiện nghe máy, đang bận, đang làm, shop ồn, hoặc nhắn qua đây thì vẫn tiếp tục tư vấn quạt. Không được hỏi lại khách cần quạt hay thiết bị vệ sinh.
+- Chỉ đổi sang thiết bị vệ sinh/phòng tắm/lavabo/sen vòi khi khách chủ động hỏi rõ sản phẩm đó.
+- Nếu server đã gửi carousel thì không tự nói thêm "vui lòng đợi"; chỉ nói ngắn gọn rằng mẫu ở bên dưới.
+- Nếu khách xin ảnh/xin mẫu/catalog, server sẽ xử lý theo thứ tự: tin giới thiệu ngắn -> slide ảnh -> tin chốt xin SĐT/Zalo. Bot không cần tự lặp lại quy trình này.
+
 LỊCH SỬ HỘI THOẠI:
 ${historyText}
         `;

@@ -24,40 +24,36 @@ function saveCustomerStates(customerStates) {
 
 function ensureCustomerState(customerStates, senderId) {
     if (!customerStates[senderId]) {
-        customerStates[senderId] = {
-            productType: null,
-            lastCustomerTime: null,
-            hasContact: false,
-
-            // Giữ tương thích dữ liệu cũ
-            followUp8hSent: false,
-
-            // Cờ an toàn: tự động chăm sóc 1 lần duy nhất
-            followUpOnceSent: false,
-
-            // Sales stage mới
-            stage: "DISCOVERY",
-            lastIntent: null,
-            lastSampleTime: null,
-            sampleSentCount: 0,
-            lastPhoneAskTime: null,
-
-            lastFollowUpTime: null,
-            lastCarouselTime: null
-        };
+        customerStates[senderId] = {};
     }
 
-    if (typeof customerStates[senderId].followUpOnceSent === "undefined") {
-        customerStates[senderId].followUpOnceSent = Boolean(customerStates[senderId].followUp8hSent);
+    const state = customerStates[senderId];
+
+    if (!("productType" in state)) state.productType = null;
+    if (!("currentTopic" in state)) state.currentTopic = state.productType || null;
+    if (!("currentSubTopic" in state)) state.currentSubTopic = null;
+    if (!Array.isArray(state.previousTopics)) state.previousTopics = [];
+    if (!Array.isArray(state.carouselSent)) state.carouselSent = [];
+    if (!("lastCustomerTime" in state)) state.lastCustomerTime = null;
+    if (!("hasContact" in state)) state.hasContact = false;
+    if (!("followUp8hSent" in state)) state.followUp8hSent = false;
+
+    if (typeof state.followUpOnceSent === "undefined") {
+        state.followUpOnceSent = Boolean(state.followUp8hSent);
     }
 
-    if (!customerStates[senderId].stage) customerStates[senderId].stage = "DISCOVERY";
-    if (typeof customerStates[senderId].sampleSentCount === "undefined") customerStates[senderId].sampleSentCount = 0;
-    if (typeof customerStates[senderId].lastSampleTime === "undefined") customerStates[senderId].lastSampleTime = null;
-    if (typeof customerStates[senderId].lastPhoneAskTime === "undefined") customerStates[senderId].lastPhoneAskTime = null;
-    if (typeof customerStates[senderId].lastIntent === "undefined") customerStates[senderId].lastIntent = null;
+    if (!state.stage) state.stage = "DISCOVERY";
+    if (typeof state.lastIntent === "undefined") state.lastIntent = null;
+    if (typeof state.lastSampleTime === "undefined") state.lastSampleTime = null;
+    if (typeof state.sampleSentCount === "undefined") state.sampleSentCount = 0;
+    if (typeof state.lastPhoneAskTime === "undefined") state.lastPhoneAskTime = null;
+    if (typeof state.askedPhone === "undefined") state.askedPhone = false;
+    if (typeof state.phoneRejected === "undefined") state.phoneRejected = false;
+    if (typeof state.preferMessenger === "undefined") state.preferMessenger = false;
+    if (typeof state.lastFollowUpTime === "undefined") state.lastFollowUpTime = null;
+    if (typeof state.lastCarouselTime === "undefined") state.lastCarouselTime = null;
 
-    return customerStates[senderId];
+    return state;
 }
 
 module.exports = {
