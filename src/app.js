@@ -514,6 +514,13 @@ COMBO / THIẾT BỊ:
 - Có hỗ trợ chi phí khách đến showroom theo chương trình.
 - Có hỗ trợ vận chuyển khi mua hàng theo chính sách.
 
+QUY TẮC ƯU TIÊN TUYỆT ĐỐI:
+- Nếu khách đã để lại SĐT/Zalo: không hỏi thêm nhu cầu, không hỏi ngân sách, không xin số lại, không tư vấn dài. Chỉ xác nhận đã nhận số và báo chuyên viên sẽ gọi/gửi catalogue qua Zalo vì Messenger quảng cáo dễ trôi tin.
+- Nếu khách đã có SĐT/Zalo nhưng vẫn hỏi thêm: trả lời trực tiếp tối đa 1-2 câu rồi lái về chuyên viên gọi lại.
+- Nếu khách hỏi hãng/thương hiệu/xuất xứ: phải trả lời trực tiếp trước. Thiết bị vệ sinh có TOTO, INAX, Viglacera, Huge, Caesar... và thương hiệu riêng GUKA. Không được hỏi ngược "mua combo hay mua lẻ" trước khi trả lời hãng.
+- Không được nói "em gửi ảnh/mẫu bên dưới", "em gửi catalogue" nếu server chưa chắc chắn gửi được ảnh ngay sau đó.
+- Riêng bồn cầu/bệt hiện chưa có bộ ảnh tự động riêng: không hứa gửi ảnh bên dưới, hãy xin SĐT/Zalo để chuyên viên gửi đúng mẫu.
+
 QUY TẮC:
 - Ưu tiên tư vấn có giá trị trước.
 - Nếu khách hỏi giá, xin mẫu, xin ảnh, hỏi "mẫu này bao nhiêu", "gửi mẫu", "cho xem mẫu": phải trả lời đúng sản phẩm trước, chỉ nói khoảng giá khi có dữ liệu chắc chắn, sau đó hỏi thêm tối đa 1 tiêu chí lọc mẫu.
@@ -1074,6 +1081,66 @@ function buildPhoneAskByTopic(productType) {
     return "Anh để lại SĐT/Zalo giúp em, bên em gửi thêm mẫu và báo giá chi tiết nhanh hơn nhé?";
 }
 
+
+function isBrandQuestion(customerMessage) {
+    const msg = String(customerMessage || "").toLowerCase();
+    return [
+        "hãng nào", "hang nao", "thương hiệu", "thuong hieu",
+        "của hãng", "cua hang", "hãng gì", "hang gi",
+        "sản xuất", "san xuat", "xuất xứ", "xuat xu",
+        "nước nào", "nuoc nao", "made in"
+    ].some(word => msg.includes(word));
+}
+
+function buildBrandReply(productType) {
+    if (productType === "fan") {
+        return "Dạ quạt bên em có thương hiệu riêng GUKA, nhiều phiên bản từ cơ bản đến cao cấp, có bản động cơ Nhật/Ý. Nếu anh cần đúng mẫu và báo giá, anh để lại SĐT/Zalo để chuyên viên gửi catalogue và tư vấn nhanh hơn ạ.";
+    }
+
+    if (productType === "combo" || productType === "faucet" || productType === "kitchen_bath") {
+        return "Dạ thiết bị vệ sinh bên em phân phối nhiều hãng như TOTO, INAX, Viglacera, Huge, Caesar... và có thương hiệu riêng GUKA. Anh cần xem hãng nào hoặc tầm giá nào ạ? Nếu tiện anh để lại SĐT/Zalo, chuyên viên sẽ gửi đúng mẫu và báo giá nhanh hơn ạ.";
+    }
+
+    if (productType === "kitchen") {
+        return "Dạ thiết bị bếp bên em có nhiều thương hiệu và phân khúc khác nhau, ngoài ra có các mẫu phối đồng bộ theo nhu cầu. Anh cần xem nhóm bếp từ, hút mùi hay chậu vòi ạ? Nếu tiện anh để lại SĐT/Zalo để chuyên viên gửi đúng mẫu và báo giá nhanh hơn ạ.";
+    }
+
+    return "Dạ bên em phân phối nhiều thương hiệu lớn như TOTO, INAX, Viglacera, Huge, Caesar... và có thương hiệu riêng GUKA. Anh cần xem hãng nào hoặc tầm giá nào ạ?";
+}
+
+function isToiletOnlyQuestion(customerMessage) {
+    const msg = String(customerMessage || "").toLowerCase();
+    const toiletWords = ["bồn cầu", "bon cau", "bệt", "bet", "bồn vệ sinh", "bon ve sinh", "liền khối", "lien khoi"];
+    const comboWords = ["combo", "phòng tắm", "phong tam", "nhà tắm", "nha tam", "thiết bị vệ sinh", "thiet bi ve sinh"];
+    return toiletWords.some(word => msg.includes(word)) && !comboWords.some(word => msg.includes(word));
+}
+
+function buildToiletSampleFallback() {
+    return "Dạ bồn vệ sinh bên em có nhiều mẫu liền khối và nhiều phân khúc, từ dòng tiết kiệm đến cao cấp. Hiện ảnh bồn cầu chưa gửi tự động ổn định trên Messenger, anh để lại SĐT/Zalo để chuyên viên gửi đúng mẫu, đúng giá và gọi tư vấn nhanh hơn ạ.";
+}
+
+function buildContactHandoverReply(customerMessage, state) {
+    const msg = String(customerMessage || "").toLowerCase();
+
+    if (isBrandQuestion(msg)) {
+        if ((state.currentTopic || state.productType) === "fan") {
+            return "Dạ quạt bên em có thương hiệu riêng GUKA, có dòng cơ bản đến cao cấp và bản động cơ Nhật/Ý. Em đã có SĐT/Zalo của anh rồi, chuyên viên sẽ gọi lại để gửi đúng mẫu và báo giá chi tiết ạ.";
+        }
+
+        return "Dạ thiết bị vệ sinh bên em có TOTO, INAX, Viglacera, Huge, Caesar... và thương hiệu riêng GUKA. Em đã có SĐT/Zalo của anh rồi, chuyên viên sẽ gọi lại để gửi đúng mẫu và báo giá chi tiết ạ.";
+    }
+
+    if (msg.includes("giá") || msg.includes("gia") || msg.includes("bao nhiêu") || msg.includes("bao nhieu") || msg.includes("báo giá") || msg.includes("bao gia")) {
+        return "Dạ bên em đã nhận được SĐT/Zalo của anh rồi. Chuyên viên sẽ gọi lại để báo đúng mẫu, đúng giá và gửi catalogue chi tiết, tránh Messenger quảng cáo bị trôi tin ạ.";
+    }
+
+    if (msg.includes("mẫu") || msg.includes("mau") || msg.includes("ảnh") || msg.includes("hình") || msg.includes("hinh") || msg.includes("catalog")) {
+        return "Dạ em đã nhận được SĐT/Zalo của anh rồi. Chuyên viên sẽ gửi catalogue/mẫu qua Zalo và gọi tư vấn trực tiếp để anh dễ chọn hơn ạ.";
+    }
+
+    return "Dạ em đã nhận được SĐT/Zalo của anh rồi. Chuyên viên sẽ chủ động liên hệ tư vấn chi tiết trong thời gian sớm nhất ạ.";
+}
+
 function isProbablyUnsupportedProduct(customerMessage, state) {
     const msg = String(customerMessage || "").toLowerCase();
     if (detectExplicitTopic(msg)) return false;
@@ -1460,6 +1527,45 @@ async function handleMessage(event) {
 
     saveConversations(conversations);
     saveCustomerStates(customerStates);
+
+    // Nếu khách đã có SĐT/Zalo: không hỏi khai thác, không tư vấn lan man, chuyển chuyên viên.
+    if (state.hasContact) {
+        const reply = buildContactHandoverReply(customerMessage, state);
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${state.currentTopic || "unknown"} | HAS_CONTACT_HANDOVER`);
+        conversations[senderId] = conversations[senderId].slice(-80);
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        await sendMessage(senderId, reply);
+        return;
+    }
+
+    // Khách hỏi thương hiệu/hãng phải trả lời thương hiệu trước, không hỏi lệch sang nhu cầu phòng tắm/combo.
+    if (isBrandQuestion(customerMessage)) {
+        const reply = buildBrandReply(state.currentTopic || state.productType || detectProductType(customerMessage, currentHistoryText));
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${state.currentTopic || "unknown"} | BRAND_REPLY`);
+        conversations[senderId] = conversations[senderId].slice(-80);
+        state.stage = "GET_PHONE";
+        state.askedPhone = true;
+        state.lastPhoneAskTime = Date.now();
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        await sendMessage(senderId, reply);
+        return;
+    }
+
+    // Riêng bồn cầu/bệt chưa có bộ ảnh tự động riêng: không được hứa gửi ảnh bên dưới.
+    if (isToiletOnlyQuestion(customerMessage) && shouldSendCarousel(customerMessage)) {
+        const reply = buildToiletSampleFallback();
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:toilet | TOILET_NO_AUTO_IMAGE`);
+        conversations[senderId] = conversations[senderId].slice(-80);
+        state.stage = "GET_PHONE";
+        state.askedPhone = true;
+        state.lastPhoneAskTime = Date.now();
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        await sendMessage(senderId, reply);
+        return;
+    }
 
     // Flow tư vấn mới:
     // Khách hỏi sản phẩm cụ thể -> xin số nhẹ. Nếu chưa cho thì khai thác 1-2 câu hỏi.
