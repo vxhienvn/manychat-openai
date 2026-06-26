@@ -1,6 +1,9 @@
-// ===== AIGUKA PRODUCT SHEET ENGINE V1 =====
-// Mục tiêu: đọc Google Sheet Master để bot chỉ báo khoảng giá min -> max,
-// không bao giờ báo giá cụ thể từng mẫu. Ảnh hiện vẫn dùng gallery có sẵn trong code.
+// ===== AIGUKA PRODUCT SHEET ENGINE V2 / v3.9 =====
+// Mục tiêu:
+// - Đọc Google Sheet Master theo cấu trúc thật của showroom:
+//   A Folder | B Tên sản phẩm | C số cánh | D màu | E giá thấp nhất(VNĐ) | F giá cao nhất(VNĐ)
+// - Bot chỉ báo khoảng giá min -> max, không báo giá cụ thể từng mẫu/model.
+// - Google Sheet là bản đồ tư vấn; Google Drive là kho ảnh; Sales là người chốt.
 
 const DEFAULT_PRODUCT_SHEET_CSV_URL = "https://docs.google.com/spreadsheets/d/1HZH7ajJj5L2nZF77TP42vc60sLdBDgre0if8i1WFMj4/export?format=csv&gid=0";
 
@@ -75,14 +78,32 @@ function parseCsv(text = "") {
     return rows;
 }
 
+function getValue(row, normalizedHeader) {
+    const value = row[normalizedHeader];
+    return String(value || "").trim();
+}
+
 function pick(row, keys) {
-    for (const key of keys) {
-        const normalized = normalizeKey(key);
-        if (Object.prototype.hasOwnProperty.call(row, normalized)) {
-            const value = String(row[normalized] || "").trim();
+    const normalizedKeys = keys.map(normalizeKey);
+
+    // 1) Ưu tiên khớp chính xác.
+    for (const key of normalizedKeys) {
+        if (Object.prototype.hasOwnProperty.call(row, key)) {
+            const value = getValue(row, key);
             if (value) return value;
         }
     }
+
+    // 2) Chấp nhận tiêu đề có thêm hậu tố như: gia_thap_nhat_vnđ -> gia_thap_nhat.
+    for (const wanted of normalizedKeys) {
+        for (const actual of Object.keys(row)) {
+            if (actual === wanted || actual.startsWith(`${wanted}_`) || actual.includes(wanted)) {
+                const value = getValue(row, actual);
+                if (value) return value;
+            }
+        }
+    }
+
     return "";
 }
 
@@ -90,7 +111,7 @@ function parsePriceNumber(value) {
     const raw = String(value || "").trim();
     if (!raw) return null;
 
-    // Hỗ trợ 3.950.000, 3,95 triệu, 3950000, 3.95tr
+    // Hỗ trợ: 3950000, 3.950.000, 3,95 triệu, 3.95tr, 600.000 đ.
     const lower = normalizeText(raw).replace(/,/g, ".");
     const hasMillion = lower.includes("trieu") || lower.includes("tr");
     const digitsAndDots = lower.replace(/[^0-9.]/g, "");
@@ -123,6 +144,8 @@ function formatPriceShort(value) {
 }
 
 function buildRangeText(row) {
+    if (!row) return "";
+
     const minText = formatPriceShort(row.price_min);
     const maxText = formatPriceShort(row.price_max);
 
@@ -130,6 +153,15 @@ function buildRangeText(row) {
     if (minText && maxText && minText === maxText) return `khoảng ${minText}`;
     if (minText) return `từ khoảng ${minText}`;
     if (maxText) return `dưới khoảng ${maxText}`;
+    return "";
+}
+
+function inferCategoryFromPath(path = "") {
+    const first = normalizeText(String(path).split(/[\\/]/)[0] || "");
+    if (first.includes("fan") || first.includes("quat")) return "Fan";
+    if (first.includes("bathroom") || first.includes("phong tam") || first.includes("lavabo") || first.includes("bon") || first.includes("sen")) return "Bathroom";
+    if (first.includes("kitchen") || first.includes("bep") || first.includes("chau")) return "Kitchen";
+    if (first.includes("lighting") || first.includes("den")) return "Lighting";
     return "";
 }
 
@@ -146,23 +178,37 @@ function normalizeProductRows(csvText) {
             raw[header] = String(values[index] || "").trim();
         });
 
-        const category = pick(raw, ["Danh mục", "Danh muc", "Category"]);
-        const group = pick(raw, ["Nhóm sản phẩm", "Nhom san pham", "Tên nhóm", "Ten nhom", "Sản phẩm", "San pham"]);
-        const path = pick(raw, ["Đường dẫn", "Duong dan", "Folder", "Path"]);
-        const priceMin = pick(raw, ["Giá thấp nhất", "Gia thap nhat", "Giá min", "Gia min", "Min", "Price min"]);
-        const priceMax = pick(raw, ["Giá cao nhất", "Gia cao nhat", "Giá max", "Gia max", "Max", "Price max"]);
+        // Sheet hiện tại của showroom:
+        // A Folder | B Tên sản | C số cánh | D màu | E giá thấp nhất(VNĐ) | F giá cao nhất(VNĐ) | G giá vận chuyển/lắp đặt (không dùng để tư vấn)
+        const path = pick(raw, ["Folder", "Đường dẫn", "Duong dan", "Path"]);
+        const group = pick(raw, ["Tên sản", "Ten san", "Tên sản phẩm", "Ten san pham", "Nhóm sản phẩm", "Nhom san pham", "Sản phẩm", "San pham"]);
+        const blades = pick(raw, ["số cánh", "so canh", "cánh", "canh"]);
+        const color = pick(raw, ["màu", "mau", "color"]);
+        const priceMin = pick(raw, ["giá thấp nhất", "gia thap nhat", "giá min", "gia min", "min", "price min"]);
+        const priceMax = pick(raw, ["giá cao nhất", "gia cao nhat", "giá max", "gia max", "max", "price max"]);
         const note = pick(raw, ["Ghi chú", "Ghi chu", "Note"]);
+        let category = pick(raw, ["Danh mục", "Danh muc", "Category"]);
+        if (!category) category = inferCategoryFromPath(path);
 
-        if (!category && !group && !path) continue;
+        // Bỏ qua dòng rỗng/không đủ dữ liệu thật. Tránh lấy nhầm dòng test như chỉ có chữ "tủ".
+        if (!path && !priceMin && !priceMax) continue;
+        if (!group && !path) continue;
+
+        const labelParts = [group];
+        if (blades) labelParts.push(`${blades} cánh`);
+        if (color) labelParts.push(color);
+        const displayLabel = labelParts.filter(Boolean).join(" ").replace(/\s+/g, " ").trim();
 
         result.push({
             category,
-            group,
+            group: group || displayLabel || category,
             path,
+            blades,
+            color,
             price_min: priceMin,
             price_max: priceMax,
             note,
-            search_text: normalizeText(`${category} ${group} ${path} ${note}`)
+            search_text: normalizeText(`${category} ${group} ${path} ${blades} ${color} ${note}`)
         });
     }
 
@@ -210,17 +256,15 @@ function scoreProductRow(row, productType, message = "", history = "") {
         if (haystack.includes(normalizeText(term))) score += 12;
     }
 
-    // Từ khóa cụ thể trong câu khách hỏi: màu, số cánh, nhóm sản phẩm...
     const keywords = [
-        "10 canh", "8 canh", "5 canh", "6 canh", "gold", "vang", "den", "black", "nau", "brown", "wood", "go",
-        "combo", "ban chay", "dep", "cao cap", "lavabo", "bon cau", "bon tam", "sen", "voi", "bep", "hut mui", "chau"
+        "10 canh", "8 canh", "5 canh", "6 canh", "gold", "vang", "guong", "den", "black", "nau", "brown", "wood", "go",
+        "combo", "ban chay", "dep", "cao cap", "lavabo", "tu", "tu lavabo", "bon cau", "bet", "bon tam", "massage", "sen", "voi", "bep", "hut mui", "chau"
     ];
 
     for (const kw of keywords) {
         if (query.includes(kw) && haystack.includes(kw)) score += 8;
     }
 
-    // Nếu tên nhóm/path xuất hiện gần đúng trong query thì cộng thêm.
     const groupWords = normalizeText(row.group).split(" ").filter(w => w.length >= 3);
     for (const w of groupWords) {
         if (query.includes(w)) score += 2;
@@ -240,31 +284,36 @@ async function findBestProductRow(productType, message = "", history = "") {
 
     if (scored.length) return scored[0].row;
 
-    // Fallback theo productType nếu không có từ khóa chi tiết.
     const terms = productTypeToCategoryTerms(productType).map(normalizeText);
     return rows.find(row => terms.some(term => row.search_text.includes(term))) || null;
 }
 
 function buildPriceRangeReply(row, productType = "") {
+    if (!row) {
+        return "Dạ dòng này bên em có nhiều mẫu và phân khúc khác nhau. Anh/chị để lại SĐT/Zalo, bên em gửi vài mẫu phù hợp và sale báo khoảng giá đúng nhu cầu cho mình nhé?";
+    }
+
     const rangeText = buildRangeText(row);
     const label = row?.group || row?.category || "dòng này";
 
     if (!rangeText) {
-        return `Dạ ${label} bên em có nhiều mẫu và phân khúc khác nhau. Anh để lại SĐT/Zalo, bên em gửi mẫu phù hợp và báo khoảng giá chính xác hơn cho anh nhé?`;
+        return `Dạ ${label} bên em có nhiều mẫu và phân khúc khác nhau. Anh/chị để lại SĐT/Zalo, bên em gửi mẫu phù hợp và báo khoảng giá chính xác hơn cho mình nhé?`;
     }
 
-    return `Dạ ${label} bên em hiện có nhiều phiên bản, giá ${rangeText} tùy mẫu và chương trình tại thời điểm tư vấn ạ. Anh để lại SĐT/Zalo, bên em gửi thêm mẫu phù hợp và báo chi tiết cho anh nhé?`;
+    return `Dạ ${label} bên em hiện có nhiều phiên bản, giá ${rangeText} tùy mẫu và phân khúc ạ. Em chưa báo giá chi tiết từng mẫu trên Messenger để tránh sai chương trình. Anh/chị để lại SĐT/Zalo, sale bên em gửi đúng mẫu phù hợp và báo chi tiết cho mình nhé?`;
 }
 
 function buildProductIntroWithPrice(row, productType = "") {
+    if (!row) return "Dạ em gửi anh/chị vài mẫu nổi bật để mình tham khảo trước nhé.";
+
     const rangeText = buildRangeText(row);
     const label = row?.group || row?.category || "một số mẫu";
 
     if (rangeText) {
-        return `Dạ em gửi anh vài mẫu ${label} nổi bật để tham khảo nhé. Dòng này giá ${rangeText} tùy mẫu và chương trình ạ.`;
+        return `Dạ em gửi anh/chị vài mẫu ${label} nổi bật để tham khảo trước nhé. Dòng này giá ${rangeText} tùy mẫu và phân khúc ạ.`;
     }
 
-    return `Dạ em gửi anh vài mẫu ${label} nổi bật để tham khảo nhé.`;
+    return `Dạ em gửi anh/chị vài mẫu ${label} nổi bật để tham khảo trước nhé.`;
 }
 
 module.exports = {

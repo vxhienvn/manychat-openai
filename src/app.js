@@ -473,7 +473,7 @@ const carouselLocks = new Set();
 const humanTakeoverTimers = new Map();
 
 app.get('/', (req, res) => {
-    res.send('Server OK');
+    res.send('Server OK - AIGUKA v3.9.0 Product Sheet Parser');
 });
 
 app.get('/product-sheet-debug', async (req, res) => {
