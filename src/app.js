@@ -3,6 +3,7 @@ const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
 const { loadProductRows, findBestProductRow, buildPriceRangeReply, buildProductIntroWithPrice } = require('./services/productSheetService');
+const { listProductImagesByPath, debugDrivePath, driveReady } = require('./services/productDriveService');
 
 const app = express();
 app.use(express.json());
@@ -473,7 +474,7 @@ const carouselLocks = new Set();
 const humanTakeoverTimers = new Map();
 
 app.get('/', (req, res) => {
-    res.send('Server OK - AIGUKA v3.9.0 Product Sheet Parser');
+    res.send('Server OK - AIGUKA v3.9.6 Dashboard Source + Product Engine V1');
 });
 
 app.get('/product-sheet-debug', async (req, res) => {
@@ -486,6 +487,16 @@ app.get('/product-sheet-debug', async (req, res) => {
         });
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/product-drive-debug', async (req, res) => {
+    try {
+        const folder = String(req.query.folder || req.query.path || "");
+        const result = await debugDrivePath(folder, { force: req.query.force === '1' });
+        res.json({ success: true, version: "3.9.6", ...result });
+    } catch (error) {
+        res.status(500).json({ success: false, version: "3.9.6", error: error.message });
     }
 });
 
@@ -1234,35 +1245,104 @@ async function sendImageMessage(senderId, imageUrl, logName = "Image message") {
     }
 }
 
-async function sendImageGalleryByProduct(senderId, productType, limit = 4) {
+function getStaticProductItems(productType) {
+    if (productType === "combo") return PRODUCT_IMAGE_GALLERIES.combo || [];
+    if (productType === "fan") return PRODUCT_IMAGE_GALLERIES.fan || [];
+    if (productType === "faucet" || productType === "kitchen") return PRODUCT_IMAGE_GALLERIES.faucet || [];
+    if (productType === "kitchen_bath") return (PRODUCT_IMAGE_GALLERIES.combo || []).slice(0, 2).concat((PRODUCT_IMAGE_GALLERIES.faucet || []).slice(0, 2));
+    return [];
+}
+
+function isAskMoreImagesMessage(message = "") {
+    const msg = String(message || "").toLowerCase();
+    return [
+        "xem tiếp", "xem tiep", "gửi tiếp", "gui tiep", "gửi thêm", "gui them",
+        "còn mẫu", "con mau", "còn ảnh", "con anh", "ảnh khác", "anh khac",
+        "mẫu khác", "mau khac", "còn nữa", "con nua", "thêm mẫu", "them mau",
+        "cho xem thêm", "cho xem them"
+    ].some(x => msg.includes(x));
+}
+
+function productPhotoKey(productType, productRow) {
+    return String(productRow?.path || productRow?.group || productType || "unknown").toLowerCase();
+}
+
+function buildMessengerElements(items, titlePrefix = "Mẫu") {
+    return (items || []).slice(0, 10).map((item, idx) => ({
+        title: String(item.title || item.name || `${titlePrefix} ${idx + 1}`).slice(0, 80),
+        subtitle: "Mẫu tiêu biểu bên em, anh/chị bấm gọi hoặc để lại Zalo để sale gửi thêm.",
+        image_url: item.image_url,
+        buttons: [{ type: "phone_number", title: "Gọi tư vấn", payload: "0973693677" }]
+    })).filter(x => x.image_url);
+}
+
+async function loadProductMediaItems(productType, productRow) {
     let items = [];
+    if (productRow?.path) {
+        try {
+            items = await listProductImagesByPath(productRow.path);
+        } catch (error) {
+            console.error("Drive image list error:", productRow.path, error.message);
+        }
+    }
+    if (!items || !items.length) items = getStaticProductItems(productType);
+    return items || [];
+}
 
-    if (productType === "combo") {
-        items = PRODUCT_IMAGE_GALLERIES.combo;
-    } else if (productType === "fan") {
-        items = PRODUCT_IMAGE_GALLERIES.fan;
-    } else if (productType === "faucet" || productType === "kitchen") {
-        items = PRODUCT_IMAGE_GALLERIES.faucet;
-    } else if (productType === "kitchen_bath") {
-        items = PRODUCT_IMAGE_GALLERIES.combo.slice(0, 2).concat(PRODUCT_IMAGE_GALLERIES.faucet.slice(0, 2));
+function buildAfterSlide2Close() {
+    return "Đây là một số sản phẩm tiêu biểu bên em đang có. Thực tế showroom còn nhiều mẫu khác với nhiều phong cách và mức giá khác nhau. Anh/chị cho em xin SĐT hoặc Zalo, bên em gửi thêm đúng mẫu phù hợp với nhu cầu nhé. Gửi qua Zalo cũng tiện hơn vì Messenger dễ trôi tin và gửi nhiều ảnh sẽ khá nặng ạ.";
+}
+
+async function sendProductMediaByRule(senderId, productType, productRow, state, customerMessage = "") {
+    const items = await loadProductMediaItems(productType, productRow);
+    if (!items.length) return { sent: false, reason: "no_images" };
+
+    if (!state.photoMemory || typeof state.photoMemory !== "object") state.photoMemory = {};
+    const key = productPhotoKey(productType, productRow);
+    const memory = state.photoMemory[key] || { stage: 0, sentCount: 0 };
+    const wantsMore = isAskMoreImagesMessage(customerMessage);
+
+    // PHOTO_RULE V2.0:
+    // 1-4 ảnh: gửi toàn bộ ảnh lẻ.
+    if (items.length <= 4) {
+        for (const item of items) await sendImageMessage(senderId, item.image_url, `Image ${productType} - ${item.title || item.name || "photo"}`);
+        state.photoMemory[key] = { stage: 2, sentCount: items.length, total: items.length, updatedAt: Date.now() };
+        return { sent: true, mode: "images", sentCount: items.length, total: items.length, final: true };
     }
 
+    // Nếu đã gửi slide 1 và khách xin xem tiếp: gửi toàn bộ ảnh còn lại trong slide 2.
+    if (wantsMore && memory.stage >= 1) {
+        const remaining = items.slice(Number(memory.sentCount || 10));
+        if (!remaining.length || memory.stage >= 2) {
+            await sendMessage(senderId, buildAfterSlide2Close());
+            return { sent: true, mode: "closed", sentCount: 0, total: items.length, final: true };
+        }
+        // Messenger Generic Template giới hạn 10 cards/lần. Nếu còn quá 10 ảnh, lấy 10 ảnh đầu còn lại và chốt sang Zalo.
+        const elements = buildMessengerElements(remaining.slice(0, 10), productRow?.group || "Mẫu");
+        if (elements.length) await sendTemplate(senderId, elements, `Product slide 2 ${productType}`);
+        state.photoMemory[key] = { stage: 2, sentCount: items.length, total: items.length, updatedAt: Date.now() };
+        return { sent: true, mode: "slide2", sentCount: remaining.length, total: items.length, final: true, needClose: true };
+    }
+
+    // Từ 5 ảnh trở lên: gửi Slide 1, 5-10 ảnh.
+    const firstCount = Math.min(10, Math.max(5, Math.min(items.length, 10)));
+    const elements = buildMessengerElements(items.slice(0, firstCount), productRow?.group || "Mẫu");
+    if (elements.length) await sendTemplate(senderId, elements, `Product slide 1 ${productType}`);
+    state.photoMemory[key] = { stage: 1, sentCount: firstCount, total: items.length, updatedAt: Date.now() };
+    return { sent: true, mode: "slide1", sentCount: firstCount, total: items.length, final: items.length <= firstCount };
+}
+
+async function sendImageGalleryByProduct(senderId, productType, limit = 4) {
+    const items = getStaticProductItems(productType);
     if (!items || items.length === 0) return false;
-
     const selected = items.slice(0, limit);
-
-    for (const item of selected) {
-        await sendImageMessage(senderId, item.image_url, `Image ${productType} - ${item.title}`);
-    }
-
+    for (const item of selected) await sendImageMessage(senderId, item.image_url, `Image ${productType} - ${item.title}`);
     return true;
 }
 
-async function sendCarouselByProduct(senderId, productType) {
-    // Ưu tiên gửi ảnh trực tiếp thay vì generic template/carousel,
-    // vì một số app Page/Messenger hiển thị template là "Tin nhắn này không hiển thị".
-    // Ảnh trực tiếp ổn định hơn khi tư vấn khách thật.
-    return await sendImageGalleryByProduct(senderId, productType, 3);
+async function sendCarouselByProduct(senderId, productType, productRow = null, state = {}, customerMessage = "") {
+    const result = await sendProductMediaByRule(senderId, productType, productRow, state, customerMessage);
+    return Boolean(result && result.sent) ? result : { sent: false };
 }
 
 
@@ -1904,9 +1984,9 @@ async function handleMessage(event) {
             await sendMessage(senderId, intro);
             conversations[senderId].push(`Bot: ${intro} | TIME:${Date.now()} | PRODUCT:${productType} | SHEET_INTRO`);
 
-            const sent = await sendCarouselByProduct(senderId, productType);
+            const mediaResult = await sendCarouselByProduct(senderId, productType, productRow, state, customerMessage);
 
-            if (sent) {
+            if (mediaResult && mediaResult.sent) {
                 state.lastSampleTime = Date.now();
                 state.lastCarouselTime = Date.now();
                 state.stage = "GET_PHONE";
@@ -1914,9 +1994,9 @@ async function handleMessage(event) {
                 state.carouselSent.push({ topic: productType, time: Date.now() });
                 state.carouselSent = state.carouselSent.slice(-20);
 
-                const close = buildCarouselClose(productType);
+                const close = mediaResult.needClose ? buildAfterSlide2Close() : buildCarouselClose(productType);
                 await sendMessage(senderId, close);
-                conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType}`);
+                conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType} | PHOTO_RULE:${mediaResult.mode || "unknown"}`);
             } else {
                 const fallback = "Dạ hiện em chưa gửi được ảnh trực tiếp trên Messenger. Anh để lại SĐT/Zalo, bên em gửi album mẫu và báo giá chi tiết cho anh ngay nhé?";
                 await sendMessage(senderId, fallback);
@@ -3660,10 +3740,16 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     // Nếu Meta trả 0 thì hiển thị 0 để phát hiện lỗi token/metric, không dùng số nội bộ thay thế.
     const totalAdConversations = currentDataSource === "meta"
         ? metaDirectConversations
-        : (adLevelConversations || stats.total);
-    const totalAdPhones = adsStats.reduce((sum, x) => sum + Number(x.hasPhone || 0), 0);
+        : currentDataSource === "pancake"
+            ? Number(stats.total || 0)
+            : (adLevelConversations || stats.total);
+    const totalAdPhones = currentDataSource === "pancake"
+        ? Number(stats.hasPhone || 0)
+        : adsStats.reduce((sum, x) => sum + Number(x.hasPhone || 0), 0);
     const totalCostPerConversation = dashboardCost(totalSpend, totalAdConversations || stats.total);
     const totalCostPerPhone = dashboardCost(totalSpend, totalAdPhones || stats.hasPhone);
+    const conversationCardLabel = currentDataSource === "meta" ? "Hội thoại Meta Account" : currentDataSource === "pancake" ? "Hội thoại Pancake" : "Hội thoại so sánh";
+    const phoneCardLabel = currentDataSource === "pancake" ? "SĐT Pancake" : "SĐT từ QC có spend";
     const metaTime = metaData?.fetchedAt ? new Date(metaData.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const pancakeTime = pancakeMeta?.fetchedAt ? new Date(pancakeMeta.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const metaNotice = metaData?.error ? `<div class="notice red-note">Meta Ads: ${dashboardEscapeHtml(metaData.error)}</div>` : "";
@@ -3816,8 +3902,8 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 
     <div class="grid">
         <div class="card green"><div class="label">Tổng chi tiêu</div><div class="num">${dashboardMoney(totalSpend)}</div></div>
-        <div class="card blue"><div class="label">Hội thoại từ QC có spend</div><div class="num">${totalAdConversations}</div></div>
-        <div class="card green"><div class="label">SĐT từ QC có spend</div><div class="num">${totalAdPhones}</div></div>
+        <div class="card blue"><div class="label">${conversationCardLabel}</div><div class="num">${totalAdConversations}</div></div>
+        <div class="card green"><div class="label">${phoneCardLabel}</div><div class="num">${totalAdPhones}</div></div>
         <div class="card orange"><div class="label">Khách nóng</div><div class="num">${stats.hotNoPhone.length}</div></div>
         <div class="card pink"><div class="label">Cost/Hội thoại</div><div class="num">${totalCostPerConversation}</div></div>
         <div class="card red"><div class="label">Cost/SĐT</div><div class="num">${totalCostPerPhone}</div></div>
@@ -3961,7 +4047,7 @@ app.get('/dashboard-source-debug', async (req, res) => {
         const adsStatsPancake = dashboardBuildAdStats(filteredPancake, metaData, [], "pancake");
         res.json({
             success: true,
-            version: "3.9.5",
+            version: "3.9.6",
             dateRange,
             meta: {
                 totalMessages: Number(metaDaily?.totalMessages || 0),

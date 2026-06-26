@@ -1,5 +1,32 @@
 # AIGUKA CHANGELOG
 
+## v3.9.6 - Dashboard Source Fix + Product Engine V1
+
+### Dashboard
+- Hoàn thiện logic dropdown nguồn tin nhắn.
+- Meta Direct hiển thị hội thoại theo Meta account/day Insights.
+- Pancake hiển thị hội thoại theo dữ liệu Pancake/Webhook, không dùng chung số Meta.
+- Đổi nhãn thẻ tổng quan: “Hội thoại Meta Account”, “Hội thoại Pancake” để tránh nhầm.
+
+### Product Engine V1
+- Thêm service đọc ảnh Google Drive theo `Folder` trong Google Sheet.
+- Thêm endpoint `/product-drive-debug` để kiểm tra folder ảnh.
+- Hỗ trợ biến môi trường `GOOGLE_DRIVE_PRODUCTS_ROOT_ID` và `GOOGLE_DRIVE_API_KEY`.
+- Nếu chưa cấu hình Google Drive hoặc chưa có ảnh Drive, bot tự fallback về bộ ảnh mẫu cũ để không gãy tư vấn.
+
+### PHOTO_RULE V2.0
+- 1–4 ảnh: gửi toàn bộ ảnh lẻ.
+- Từ 5 ảnh trở lên: gửi Slide 1 bằng carousel 5–10 ảnh.
+- Nếu khách đòi xem tiếp: gửi Slide 2 gồm phần ảnh còn lại.
+- Sau Slide 2: chèn câu xin SĐT/Zalo vì Messenger dễ trôi tin và gửi nhiều ảnh sẽ nặng.
+- Bot nhớ trạng thái slide theo từng khách/từng nhóm ảnh để không gửi lại Slide 1 khi khách hỏi tiếp.
+
+### Price Rule
+- Tiếp tục khóa nguyên tắc chỉ báo khoảng giá min–max từ Google Sheet.
+- Không báo giá cụ thể từng mẫu/model/ảnh trên Messenger.
+
+---
+
 ## v3.9.5 - Dashboard Meta/Pancake source lock
 
 ### Dashboard

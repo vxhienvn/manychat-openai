@@ -1,28 +1,28 @@
-# AIGUKA 3.9.5
-
-## Mục tiêu bản này
-Đóng lỗi dashboard Meta/Pancake: khi chọn **Meta trực tiếp**, số hội thoại phải khớp Meta Ads Manager/báo cáo tháng, không lấy số từ webhook/Pancake.
+# AIGUKA v3.9.6
 
 ## Deploy
+
 ```bash
 git add .
-git commit -m "AIGUKA 3.9.5 - Lock dashboard Meta direct source"
+git commit -m "AIGUKA 3.9.6 - Dashboard source fix and Product Engine V1"
 git push origin main
 ```
 
 ## Kiểm tra sau deploy
+
 ```text
 /dashboard-today?time_basis=meta&data_source=meta&force=1
-/dashboard-meta-month?data_source=meta&force=1
+/dashboard-today?time_basis=pancake&data_source=pancake&force=1
 /dashboard-source-debug?mode=today&time_basis=meta&data_source=meta&force=1
+/product-sheet-debug?force=1
+/product-drive-debug?folder=fan/10%20cánh/Gold&force=1
 ```
 
-## Quy tắc nguồn dữ liệu dashboard
-- Meta Direct: hội thoại lấy từ Meta account/day Insights.
-- Pancake: hội thoại lấy từ Pancake/Webhook.
-- SĐT/Zalo: dữ liệu bổ sung từ webhook/Pancake, không làm tăng số hội thoại Meta.
+## Biến môi trường Google Drive tùy chọn
 
-## Product Sheet
-- Bot đọc Google Sheet.
-- Chỉ báo khoảng giá min → max.
-- Không báo giá cụ thể từng mẫu/model.
+```text
+GOOGLE_DRIVE_PRODUCTS_ROOT_ID=<folder_id_của thư mục Products>
+GOOGLE_DRIVE_API_KEY=<Google API key có bật Drive API>
+```
+
+Nếu chưa cấu hình Google Drive, bot vẫn fallback về bộ ảnh mẫu cũ.
