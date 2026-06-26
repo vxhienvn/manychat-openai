@@ -13,6 +13,226 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const HISTORY_FILE = path.join(__dirname, '..', 'conversations.json');
 const STATE_FILE = path.join(__dirname, '..', 'customer_states.json');
 
+// ===== AIGUKA 3.8 INTERNAL META CRM =====
+// Lưu dữ liệu tin nhắn trực tiếp từ Meta Webhook để dashboard không phụ thuộc Pancake.
+const MESSAGE_EVENTS_FILE = path.join(__dirname, '..', 'message_events.json');
+const INTERNAL_CUSTOMERS_FILE = path.join(__dirname, '..', 'internal_customers.json');
+
+
+function loadJsonFile(filePath, fallback) {
+    try {
+        if (fs.existsSync(filePath)) {
+            const raw = fs.readFileSync(filePath, 'utf8').trim();
+            if (!raw) return fallback;
+            return JSON.parse(raw);
+        }
+    } catch (error) {
+        console.error("Load JSON error:", filePath, error.message);
+    }
+    return fallback;
+}
+
+function saveJsonFile(filePath, data) {
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    } catch (error) {
+        console.error("Save JSON error:", filePath, error.message);
+    }
+}
+
+function normalizeVietnamesePhone(raw) {
+    const text = String(raw || "");
+    let digits = text.replace(/[^0-9+]/g, "");
+    if (digits.startsWith("+84")) digits = "0" + digits.slice(3);
+    digits = digits.replace(/[^0-9]/g, "");
+    if (digits.length > 10 && digits.startsWith("84")) digits = "0" + digits.slice(2);
+    return digits;
+}
+
+function extractPhonesFromText(text) {
+    const src = String(text || "");
+    const matches = src.match(/(?:\+84|0)[0-9\s.\-]{8,13}/g) || [];
+    const phones = [];
+    for (const m of matches) {
+        const n = normalizeVietnamesePhone(m);
+        if (/^0[0-9]{9}$/.test(n) && !phones.includes(n)) phones.push(n);
+    }
+    return phones;
+}
+
+function detectZaloFromText(text) {
+    const t = String(text || "").toLowerCase();
+    return t.includes("zalo") || t.includes("za lo") || t.includes("zalo em") || t.includes("zalo anh") || t.includes("zalo chị");
+}
+
+function makeInternalCustomerKey(pageId, senderId) {
+    return `${pageId || "unknown_page"}:${senderId || "unknown_sender"}`;
+}
+
+function getReferralInfoFromEvent(event) {
+    const ref = event?.referral || event?.message?.referral || event?.postback?.referral || {};
+    return {
+        source: ref.source || "",
+        type: ref.type || "",
+        ref: ref.ref || "",
+        ad_id: ref.ad_id || ref.ad?.id || "",
+        adgroup_id: ref.adgroup_id || "",
+        campaign_id: ref.campaign_id || ""
+    };
+}
+
+function buildInternalTags({ text = "", state = {}, phones = [], hasZalo = false, direction = "customer" }) {
+    const tags = new Set();
+    const lower = String(text || "").toLowerCase();
+    if (phones.length || state.hasContact) tags.add("Có SĐT");
+    if (hasZalo) tags.add("Zalo");
+    if (pancakeIsHotLead({ snippet: text })) tags.add("Khách nóng");
+    const product = pancakeClassifyProduct(text);
+    if (product && product !== "Khác") tags.add(product);
+    if (direction === "admin") tags.add("Admin đã trả lời");
+    if (state.stage === "HUMAN_HANDOVER") tags.add("Chuyển chuyên viên");
+    if (state.phoneRejected || state.preferMessenger) tags.add("Không muốn gọi");
+    return Array.from(tags);
+}
+
+function loadMessageEvents() {
+    const data = loadJsonFile(MESSAGE_EVENTS_FILE, []);
+    return Array.isArray(data) ? data : [];
+}
+
+function saveMessageEvents(events) {
+    // Giữ tối đa 200.000 event trong file JSON để tránh phình quá nhanh trên Render.
+    const max = Math.max(Number(process.env.MESSAGE_EVENTS_MAX || 200000), 10000);
+    saveJsonFile(MESSAGE_EVENTS_FILE, events.slice(-max));
+}
+
+function loadInternalCustomers() {
+    const data = loadJsonFile(INTERNAL_CUSTOMERS_FILE, {});
+    return data && typeof data === "object" && !Array.isArray(data) ? data : {};
+}
+
+function saveInternalCustomers(customers) {
+    saveJsonFile(INTERNAL_CUSTOMERS_FILE, customers);
+}
+
+function recordInternalMessageEvent({ event = null, senderId = "", pageId = "", direction = "customer", text = "", state = null, extra = {} }) {
+    try {
+        const now = Date.now();
+        const actualPageId = pageId || event?.recipient?.id || event?.page_id || "unknown_page";
+        const actualSenderId = senderId || event?.sender?.id || event?.recipient?.id || "unknown_sender";
+        const key = makeInternalCustomerKey(actualPageId, actualSenderId);
+        const actualState = state || (customerStates[actualSenderId] || {});
+        const phones = extractPhonesFromText(text);
+        const hasZalo = detectZaloFromText(text);
+        const referral = getReferralInfoFromEvent(event);
+        const product = (actualState.currentTopic || actualState.productType) ? dashboardProductLabelFromTopic(actualState.currentTopic || actualState.productType) : pancakeClassifyProduct(text);
+        const tags = buildInternalTags({ text, state: actualState, phones, hasZalo, direction });
+
+        const messageEvent = {
+            id: event?.message?.mid || `${actualPageId}-${actualSenderId}-${direction}-${now}`,
+            customer_key: key,
+            page_id: actualPageId,
+            sender_id: actualSenderId,
+            direction,
+            text: String(text || ""),
+            timestamp: now,
+            created_at: new Date(now).toISOString(),
+            phones,
+            has_phone: phones.length > 0,
+            has_zalo: hasZalo,
+            product,
+            tags,
+            referral,
+            ad_id: referral.ad_id || extra.ad_id || "",
+            source: "meta_webhook",
+            ...extra
+        };
+
+        const events = loadMessageEvents();
+        if (!events.some(e => e.id === messageEvent.id && e.direction === messageEvent.direction)) {
+            events.push(messageEvent);
+            saveMessageEvents(events);
+        }
+
+        const customers = loadInternalCustomers();
+        const old = customers[key] || {
+            customer_key: key,
+            page_id: actualPageId,
+            sender_id: actualSenderId,
+            name: actualSenderId,
+            first_seen_at: messageEvent.created_at,
+            message_count: 0,
+            phones: [],
+            tags: [],
+            ad_ids: []
+        };
+
+        old.updated_at = messageEvent.created_at;
+        old.last_message_at = messageEvent.created_at;
+        old.last_message = messageEvent.text;
+        old.last_direction = direction;
+        old.product = product || old.product || "Khác";
+        old.message_count = Number(old.message_count || 0) + (direction === "customer" ? 1 : 0);
+        old.phones = Array.from(new Set([...(old.phones || []), ...phones]));
+        old.has_phone = old.phones.length > 0 || Boolean(actualState.hasContact);
+        old.has_zalo = Boolean(old.has_zalo || hasZalo);
+        old.tags = Array.from(new Set([...(old.tags || []), ...tags, ...(old.has_phone ? ["Có SĐT"] : []), ...(old.has_zalo ? ["Zalo"] : [])]));
+        if (messageEvent.ad_id) old.ad_ids = Array.from(new Set([...(old.ad_ids || []), messageEvent.ad_id]));
+        old.referral = messageEvent.referral || old.referral || {};
+        customers[key] = old;
+        saveInternalCustomers(customers);
+    } catch (error) {
+        console.error("recordInternalMessageEvent error:", error.message);
+    }
+}
+
+function dashboardProductLabelFromTopic(topic) {
+    const t = String(topic || "").toLowerCase();
+    if (t === "fan") return "Quạt";
+    if (t === "kitchen") return "Bếp";
+    if (t === "faucet") return "Thiết bị vệ sinh";
+    if (t === "combo") return "Combo phòng tắm";
+    if (t === "kitchen_bath") return "Combo phòng tắm";
+    return "Khác";
+}
+
+function buildInternalRowsFromMetaWebhook(limit = 500) {
+    const customers = Object.values(loadInternalCustomers());
+    const rows = customers
+        .sort((a, b) => new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime())
+        .slice(0, Math.max(Number(limit) || 500, 1))
+        .map(c => ({
+            name: c.name || c.sender_id || "Không rõ tên",
+            conversation_id: c.customer_key,
+            type: "meta_webhook",
+            updated_at: c.updated_at,
+            inserted_at: c.first_seen_at,
+            message_count: c.message_count || 0,
+            has_phone: Boolean(c.has_phone),
+            phones: c.phones || [],
+            product: c.product || pancakeClassifyProduct(c.last_message || ""),
+            hot_lead: (c.tags || []).includes("Khách nóng") || pancakeIsHotLead({ snippet: c.last_message || "" }),
+            tags: c.tags || [],
+            snippet: c.last_message || "",
+            ad_ids: c.ad_ids || [],
+            page_id: c.page_id,
+            sender_id: c.sender_id,
+            source: "Meta trực tiếp"
+        }));
+    return rows;
+}
+
+function buildMetaPancakeCompare(metaRows, pancakeRows) {
+    return {
+        meta_total: metaRows.length,
+        pancake_total: pancakeRows.length,
+        meta_phone: metaRows.filter(x => x.has_phone).length,
+        pancake_phone: pancakeRows.filter(x => x.has_phone).length,
+        meta_zalo: metaRows.filter(x => (x.tags || []).includes("Zalo")).length,
+        pancake_zalo: pancakeRows.filter(x => (x.tags || []).includes("Zalo")).length
+    };
+}
+
 function loadConversations() {
     try {
         if (fs.existsSync(HISTORY_FILE)) {
@@ -1465,6 +1685,9 @@ async function handleMessage(event) {
         processedMessages.add(messageId);
     }
 
+    // AIGUKA 3.8: lưu mọi tin nhắn khách trực tiếp từ Meta Webhook trước khi xử lý AI/Pancake.
+    recordInternalMessageEvent({ event, senderId, pageId: event.recipient?.id, direction: "customer", text: customerMessage, state });
+
     // Nếu admin vừa vào tư vấn trong 10 phút, bot chỉ lưu tin khách.
     // Sau 10 phút nếu admin không trả lời tiếp, bot sẽ đọc lại hội thoại rồi mới trả lời.
     if (state.humanTakeoverUntil && now < Number(state.humanTakeoverUntil)) {
@@ -2558,9 +2781,15 @@ async function dashboardFetchPancakeCached(limit) {
     if (cached && now - cached.time < DASHBOARD_PANCAKE_CACHE_TTL) {
         return { conversations: cached.data, fetchedAt: cached.time, fromCache: true };
     }
-    const conversations = await pancakeFetchConversations(limit);
-    dashboardCache.pancake.set(key, { time: now, data: conversations });
-    return { conversations, fetchedAt: now, fromCache: false };
+    try {
+        const conversations = await pancakeFetchConversations(limit);
+        dashboardCache.pancake.set(key, { time: now, data: conversations });
+        return { conversations, fetchedAt: now, fromCache: false };
+    } catch (error) {
+        console.error("Pancake API fallback to cache/internal:", error.message);
+        if (cached) return { conversations: cached.data, fetchedAt: cached.time, fromCache: true, error: error.message };
+        return { conversations: [], fetchedAt: null, fromCache: false, error: error.message };
+    }
 }
 
 async function dashboardFetchJson(url) {
@@ -3155,7 +3384,7 @@ function dashboardBuildAdStats(report, metaData) {
     return Object.values(map).sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0));
 }
 
-function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, dateRange }) {
+function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, dateRange, dataSource = "meta", compareStats = null }) {
     const stats = dashboardBuildStats(report);
     const adsStats = dashboardBuildAdStats(report, metaData);
     const currentLimit = String(limit || 500);
@@ -3163,6 +3392,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     const currentView = dashboardGetViewValue(req, mode);
     const currentDate = req.query.date || (dateRange.basis === "meta" ? dashboardTodayKeyMeta(0) : dashboardTodayKeyVN(0));
     const currentTimeBasis = dateRange.basis || "pancake";
+    const currentDataSource = String(dataSource || req.query.data_source || "meta");
     const totalSpend = Number(metaData?.totalSpend || 0);
     const totalAdConversations = adsStats.reduce((sum, x) => sum + Number(x.total || 0), 0);
     const totalAdPhones = adsStats.reduce((sum, x) => sum + Number(x.hasPhone || 0), 0);
@@ -3171,6 +3401,8 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     const metaTime = metaData?.fetchedAt ? new Date(metaData.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const pancakeTime = pancakeMeta?.fetchedAt ? new Date(pancakeMeta.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const metaNotice = metaData?.error ? `<div class="notice red-note">Meta Ads: ${dashboardEscapeHtml(metaData.error)}</div>` : "";
+    const pancakeNotice = pancakeMeta?.error ? `<div class="notice red-note">Pancake API đang lỗi: ${dashboardEscapeHtml(pancakeMeta.error)}. Dashboard vẫn chạy bằng dữ liệu Meta trực tiếp/cache.</div>` : "";
+    const compareNotice = compareStats ? `<div class="notice"><b>So sánh Meta trực tiếp / Pancake:</b> Hội thoại ${compareStats.meta_total}/${compareStats.pancake_total}, SĐT ${compareStats.meta_phone}/${compareStats.pancake_phone}, Zalo ${compareStats.meta_zalo}/${compareStats.pancake_zalo}.</div>` : "";
 
     const adsRows = adsStats.map((x, index) => `
         <tr class="${dashboardAdRowClass(x)}">
@@ -3233,7 +3465,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AIGUKA Dashboard V2.2</title>
+    <title>AIGUKA Dashboard 3.8</title>
     <style>
         body { margin:0; font-family:"Times New Roman", Times, serif; font-size:14px; background:#f8fafc; color:#111827; }
         .wrap { max-width:1480px; margin:0 auto; padding:18px; }
@@ -3242,7 +3474,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         .header p { margin:6px 0 0; color:#64748b; }
         .btns a { display:inline-block; margin-left:8px; padding:10px 12px; border-radius:10px; background:#2563eb; color:white; text-decoration:none; font-size:14px; }
         .btns a.red { background:#ef4444; } .btns a.green { background:#16a34a; }
-        .filters { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; background:white; padding:14px; border-radius:16px; box-shadow:0 1px 4px rgba(15,23,42,.08); margin-bottom:14px; border:1px solid #e2e8f0; }
+        .filters { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:10px; background:white; padding:14px; border-radius:16px; box-shadow:0 1px 4px rgba(15,23,42,.08); margin-bottom:14px; border:1px solid #e2e8f0; }
         .filter label { display:block; font-size:13px; color:#64748b; margin-bottom:5px; }
         .filter select,.filter input { width:100%; box-sizing:border-box; padding:10px; border-radius:10px; border:1px solid #cbd5e1; font-size:14px; background:#f8fafc; font-family:"Times New Roman", Times, serif; }
         .grid { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:12px; }
@@ -3273,7 +3505,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <div class="wrap">
     <div class="header">
         <div>
-            <h1>🤖 AIGUKA AI SALES DASHBOARD</h1>
+            <h1>🤖 AIGUKA AI SALES DASHBOARD 3.8</h1>
             <p>${dashboardEscapeHtml(title)} | Đã lấy ${fullTotal}/${limit} hội thoại | Đang hiển thị ${stats.total} hội thoại | Cập nhật: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}</p>
             <p>Pancake: ${dashboardEscapeHtml(pancakeTime)} ${pancakeMeta?.fromCache ? "(cache)" : "(mới)"} | Meta: ${dashboardEscapeHtml(metaTime)} ${metaData?.fromCache ? "(cache)" : "(mới)"} | Bộ lọc: ${dashboardEscapeHtml(dashboardTimeBasisLabel(currentTimeBasis))} | Khoảng: ${dashboardEscapeHtml(dateRange.label)}</p>
         </div>
@@ -3290,6 +3522,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 
     <div class="filters">
         <div class="filter"><label>Số hội thoại lấy</label><select id="limitSelect" onchange="applyDashboardFilters()"><option ${dashboardSelected(100,currentLimit)} value="100">100</option><option ${dashboardSelected(300,currentLimit)} value="300">300</option><option ${dashboardSelected(500,currentLimit)} value="500">500</option></select></div>
+        <div class="filter"><label>Nguồn tin nhắn</label><select id="dataSourceSelect" onchange="applyDashboardFilters()"><option value="meta" ${dashboardSelected("meta",currentDataSource)}>Meta trực tiếp</option><option value="pancake" ${dashboardSelected("pancake",currentDataSource)}>Pancake</option><option value="compare" ${dashboardSelected("compare",currentDataSource)}>So sánh Meta/Pancake</option></select></div>
         <div class="filter"><label>Thống kê khách theo</label><select id="timeBasisSelect" onchange="applyDashboardFilters()"><option value="pancake" ${dashboardSelected("pancake",currentTimeBasis)}>Giờ Pancake / Việt Nam</option><option value="meta" ${dashboardSelected("meta",currentTimeBasis)}>Giờ tài khoản quảng cáo</option></select></div>
         <div class="filter"><label>Khoảng xem</label><select id="viewSelect" onchange="applyDashboardFilters()"><option value="today" ${dashboardSelected("today",currentView)}>Hôm nay</option><option value="yesterday" ${dashboardSelected("yesterday",currentView)}>Hôm qua</option><option value="last_7d" ${dashboardSelected("last_7d",currentView)}>7 ngày</option><option value="last_30d" ${dashboardSelected("last_30d",currentView)}>30 ngày</option><option value="date" ${dashboardSelected("date",currentView)}>Ngày cụ thể</option><option value="hot" ${dashboardSelected("hot",currentView)}>Khách nóng</option></select></div>
         <div class="filter"><label>Ngày cụ thể</label><input id="dateInput" type="date" value="${dashboardEscapeHtml(currentDate)}" onchange="document.getElementById('viewSelect').value='date'; applyDashboardFilters();" /></div>
@@ -3298,6 +3531,8 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     </div>
 
     ${metaNotice}
+    ${pancakeNotice}
+    ${compareNotice}
     <div class="notice">Các chỉ số khách đang lọc theo <b>${dashboardEscapeHtml(dashboardTimeBasisLabel(currentTimeBasis))}</b>. Nếu chọn giờ Meta, ngày sẽ chạy theo ngày tài khoản quảng cáo chứ không theo ngày Việt Nam.</div>
 
     <div class="grid">
@@ -3331,7 +3566,7 @@ function toggleAdsTable(){ const el=document.getElementById('adsTableWrap'); if(
 function toggleAdvancedBox(){ const el=document.getElementById('advancedBox'); if(!el)return; el.style.display=el.style.display==='block'?'none':'block'; localStorage.setItem('aiguka_adv_box',el.style.display); }
 function toggleAdvancedColumns(){ document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ const show=cb.checked; document.querySelectorAll('.'+cb.dataset.col).forEach(el=>{ el.style.display=show?'table-cell':'none'; }); localStorage.setItem('aiguka_'+cb.dataset.col,show?'1':'0'); }); }
 function restoreDashboardState(){ const ads=document.getElementById('adsTableWrap'); if(ads && localStorage.getItem('aiguka_ads_table')) ads.style.display=localStorage.getItem('aiguka_ads_table'); const box=document.getElementById('advancedBox'); if(box && localStorage.getItem('aiguka_adv_box')) box.style.display=localStorage.getItem('aiguka_adv_box'); document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ cb.checked=localStorage.getItem('aiguka_'+cb.dataset.col)==='1'; }); toggleAdvancedColumns(); }
-function applyDashboardFilters(){ const limit=document.getElementById('limitSelect').value; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; const timeBasis=document.getElementById('timeBasisSelect')?document.getElementById('timeBasisSelect').value:'pancake'; let path='/dashboard'; const params=new URLSearchParams(); params.set('limit',limit); params.set('time_basis',timeBasis); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
+function applyDashboardFilters(){ const limit=document.getElementById('limitSelect').value; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; const timeBasis=document.getElementById('timeBasisSelect')?document.getElementById('timeBasisSelect').value:'pancake'; const dataSource=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; let path='/dashboard'; const params=new URLSearchParams(); params.set('limit',limit); params.set('time_basis',timeBasis); params.set('data_source',dataSource); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
 restoreDashboardState();
 </script>
 </body></html>`;
@@ -3340,8 +3575,19 @@ restoreDashboardState();
 async function dashboardHandler(req, res, mode = "all") {
     try {
         const limit = req.query.limit || 500;
+        const source = String(req.query.data_source || req.query.source || "meta").toLowerCase();
+        const metaRows = buildInternalRowsFromMetaWebhook(limit);
         const pancakeResult = await dashboardFetchPancakeCached(limit);
-        const fullReport = pancakeResult.conversations.map(pancakeBuildCustomerRow);
+        const pancakeRows = pancakeResult.conversations.map(pancakeBuildCustomerRow);
+        let fullReport = metaRows;
+        let compareStats = null;
+
+        if (source === "pancake") fullReport = pancakeRows;
+        if (source === "compare") {
+            fullReport = metaRows;
+            compareStats = buildMetaPancakeCompare(metaRows, pancakeRows);
+        }
+
         const filtered = dashboardFilterReport(fullReport, req, mode);
         const metaData = await dashboardFetchMetaAdsCached(filtered.dateRange);
         res.type('html').send(dashboardRenderHtml({
@@ -3353,7 +3599,9 @@ async function dashboardHandler(req, res, mode = "all") {
             mode,
             pancakeMeta: pancakeResult,
             metaData,
-            dateRange: filtered.dateRange
+            dateRange: filtered.dateRange,
+            dataSource: source,
+            compareStats
         }));
     } catch (error) {
         console.error("Dashboard error:", error);
@@ -3387,7 +3635,7 @@ app.get('/dashboard-meta-month', async (req, res) => {
         const until = monthKey === todayMeta.slice(0, 7) ? todayMeta : `${monthKey}-${String(days).padStart(2, "0")}`;
         const dateRange = { since, until, label: `${since} → ${until}`, basis: "meta" };
         const pancakeResult = await dashboardFetchPancakeCached(limit);
-        const fullReport = pancakeResult.conversations.map(pancakeBuildCustomerRow);
+        const fullReport = String(req.query.data_source || "meta").toLowerCase() === "pancake" ? pancakeResult.conversations.map(pancakeBuildCustomerRow) : buildInternalRowsFromMetaWebhook(limit);
         const report = fullReport.filter(x => {
             const key = dashboardDateKeyMeta(x.updated_at || x.inserted_at || "");
             return key && key >= since && key <= until;
@@ -3407,6 +3655,30 @@ app.get('/dashboard-meta-month', async (req, res) => {
     }
 });
 
+
+
+app.get('/internal-crm-debug', (req, res) => {
+    const events = loadMessageEvents();
+    const customers = loadInternalCustomers();
+    res.json({
+        ok: true,
+        message_events: events.length,
+        customers: Object.keys(customers).length,
+        latest_events: events.slice(-10).reverse(),
+        latest_customers: Object.values(customers).sort((a,b)=>new Date(b.updated_at||0)-new Date(a.updated_at||0)).slice(0, 20)
+    });
+});
+
+app.get('/internal-customer-history', (req, res) => {
+    const key = String(req.query.key || "");
+    const sender = String(req.query.sender_id || "");
+    const page = String(req.query.page_id || "");
+    const targetKey = key || (sender ? makeInternalCustomerKey(page || "unknown_page", sender) : "");
+    if (!targetKey) return res.status(400).send("Thiếu key hoặc sender_id");
+    const events = loadMessageEvents().filter(e => e.customer_key === targetKey || (!key && sender && e.sender_id === sender));
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.send(events.map(e => `[${e.created_at}] ${e.direction}: ${e.text}`).join("\n") || "Không có lịch sử nội bộ");
+});
 
 app.get('/meta-accounts-debug', async (req, res) => {
     try {
