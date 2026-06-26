@@ -35,3 +35,7 @@ curl -X POST https://YOUR_DOMAIN/payment-webhook \
 ```
 
 Kiểm tra dữ liệu thẻ đã lưu: `/payment-debug`.
+
+
+## Version 3.9.2
+- Fix dashboard Meta Direct conversation count to match Meta Ads Manager actions/results.

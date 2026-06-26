@@ -3550,7 +3550,7 @@ function dashboardAdRowClass(row) {
     return "row-low";
 }
 
-function dashboardBuildAdStats(report, metaData, supplementalReport = []) {
+function dashboardBuildAdStats(report, metaData, supplementalReport = [], dataSource = "meta") {
     const map = {};
     const allowedAdIds = new Set((metaData?.ads || []).map(ad => String(ad.adId)));
 
@@ -3586,11 +3586,13 @@ function dashboardBuildAdStats(report, metaData, supplementalReport = []) {
         };
     }
 
-    // Map hội thoại vào những QC đang có spend.
-    // 3.9.1: dùng cả nguồn đang xem và Pancake bổ sung để tránh tình trạng Meta Direct chưa lưu đủ ad_id/SĐT.
+    // Map SĐT/Zalo từ webhook/Pancake vào những QC đang có spend.
+    // QUAN TRỌNG 3.9.2: nếu chọn Meta trực tiếp, số HỘI THOẠI phải lấy từ Meta Insights (actions),
+    // không được lấy tổng hội thoại từ webhook/Pancake vì sẽ lệch Ads Manager.
     const mergedItems = [];
     const seenLeadKeys = new Set();
-    for (const item of [...(report || []), ...(supplementalReport || [])]) {
+    const leadSourceItems = dataSource === "pancake" ? (report || []) : [...(report || []), ...(supplementalReport || [])];
+    for (const item of leadSourceItems) {
         const ids = Array.isArray(item.ad_ids) ? item.ad_ids.map(dashboardNormalizeAdId).filter(Boolean) : [];
         const matchedIds = ids.filter(id => allowedAdIds.has(id));
         if (!matchedIds.length) continue;
@@ -3605,7 +3607,7 @@ function dashboardBuildAdStats(report, metaData, supplementalReport = []) {
     for (const { adId, item } of mergedItems) {
         const row = map[adId];
         if (!row) continue;
-        row.total++;
+        if (dataSource === "pancake") row.total++;
         if (item.has_phone) row.hasPhone++;
         if ((item.tags || []).includes("Zalo") || item.has_zalo) row.zalo++;
         if ((item.tags || []).includes("Đã Gọi")) row.called++;
@@ -3617,9 +3619,19 @@ function dashboardBuildAdStats(report, metaData, supplementalReport = []) {
     }
 
     for (const row of Object.values(map)) {
-        // Nếu Pancake/Webhook chưa map được lead theo ad_id, vẫn hiển thị số tin nhắn từ Meta Insights.
-        // SĐT/Zalo vẫn lấy từ dữ liệu hội thoại khi có.
-        row.total = Math.max(Number(row.total || 0), Number(row.metaMessages || 0));
+        if (dataSource === "meta") {
+            // Meta Direct: khớp Ads Manager. Hội thoại = Meta messaging actions, không cộng webhook.
+            row.total = Number(row.metaMessages || 0);
+            // SĐT/Zalo chỉ là dữ liệu bổ sung từ webhook, không được làm tổng hội thoại tăng lên.
+            if (row.hasPhone > row.total) row.hasPhone = row.total;
+            if (row.zalo > row.total) row.zalo = row.total;
+        } else if (dataSource === "pancake") {
+            // Pancake: hội thoại = số hội thoại thực lấy từ Pancake/webhook đã map được ad_id.
+            row.total = Number(row.total || 0);
+        } else {
+            // Compare/khác: ưu tiên không thấp hơn Meta, nhưng không dùng cho đối chiếu Ads Manager.
+            row.total = Math.max(Number(row.total || 0), Number(row.metaMessages || 0));
+        }
         row.noPhone = Math.max(0, Number(row.total || 0) - Number(row.hasPhone || 0));
     }
 
@@ -3628,7 +3640,7 @@ function dashboardBuildAdStats(report, metaData, supplementalReport = []) {
 
 function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, dateRange, dataSource = "meta", compareStats = null, pancakeReport = [] }) {
     const stats = dashboardBuildStats(report);
-    const adsStats = dashboardBuildAdStats(report, metaData, dataSource === "pancake" ? [] : pancakeReport);
+    const adsStats = dashboardBuildAdStats(report, metaData, dataSource === "pancake" ? [] : pancakeReport, currentDataSource);
     const currentLimit = String(limit || 500);
     const currentProduct = dashboardProductParamFromName(dashboardNormalizeProduct(req.query.product || "all"));
     const currentView = dashboardGetViewValue(req, mode);
@@ -3653,7 +3665,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
             ? `<span class="source-badge source-compare">🔵 So sánh Meta/Pancake</span>`
             : `<span class="source-badge source-meta">🟢 Meta Direct</span>`;
     const sourceHint = currentDataSource === "meta"
-        ? `<div class="notice green-note">${sourceBadge}<b>Đang xem dữ liệu Meta trực tiếp.</b> Dữ liệu lấy từ kho Webhook nội bộ, không giới hạn 100/300/500 hội thoại.</div>`
+        ? `<div class="notice green-note">${sourceBadge}<b>Đang xem dữ liệu Meta trực tiếp.</b> Hội thoại lấy từ <b>Meta Insights/actions</b> để khớp Ads Manager; SĐT/Zalo chỉ lấy bổ sung từ webhook/Pancake khi có.</div>`
         : currentDataSource === "compare"
             ? `<div class="notice">${sourceBadge}<b>Đang so sánh hai nguồn.</b> Meta lấy toàn bộ dữ liệu nội bộ theo khoảng ngày; giới hạn 100/300/500 chỉ áp dụng cho Pancake.</div>`
             : `<div class="notice">${sourceBadge}<b>Đang xem dữ liệu Pancake.</b> Giới hạn hội thoại Pancake áp dụng theo lựa chọn 100/300/500.</div>`;
@@ -3719,7 +3731,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AIGUKA Dashboard 3.9.1</title>
+    <title>AIGUKA Dashboard 3.9.2</title>
     <style>
         body { margin:0; font-family:"Times New Roman", Times, serif; font-size:14px; background:#f8fafc; color:#111827; }
         .wrap { max-width:1480px; margin:0 auto; padding:18px; }
@@ -3759,7 +3771,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <div class="wrap">
     <div class="header">
         <div>
-            <h1>🤖 AIGUKA AI SALES DASHBOARD 3.8</h1>
+            <h1>🤖 AIGUKA AI SALES DASHBOARD 3.9.2</h1>
             <p>${dashboardEscapeHtml(title)} | Đã lấy ${fullTotal}/${limit} hội thoại | Đang hiển thị ${stats.total} hội thoại | Cập nhật: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}</p>
             <p>Pancake: ${dashboardEscapeHtml(pancakeTime)} ${pancakeMeta?.fromCache ? "(cache)" : "(mới)"} | Meta: ${dashboardEscapeHtml(metaTime)} ${metaData?.fromCache ? "(cache)" : "(mới)"} | Bộ lọc: ${dashboardEscapeHtml(dashboardTimeBasisLabel(currentTimeBasis))} | Khoảng: ${dashboardEscapeHtml(dateRange.label)}</p>
         </div>
