@@ -2513,6 +2513,8 @@ const META_ACCOUNT_CARD_MAP = process.env.META_ACCOUNT_CARD_MAP || "";
 // Có thể đổi trên Render nếu tài khoản Meta dùng múi giờ khác.
 const META_ACCOUNT_TIMEZONE = process.env.META_ACCOUNT_TIMEZONE || "America/Los_Angeles";
 const META_CARD_LAST4 = process.env.META_CARD_LAST4 || "";
+// Best-effort: thử đọc phương thức thanh toán từ Meta account fields nếu token có quyền. Nếu API chặn thì tự bỏ qua.
+const META_FETCH_BILLING_DETAILS = String(process.env.META_FETCH_BILLING_DETAILS || "true").toLowerCase() !== "false";
 const PAYMENT_EVENTS_FILE = path.join(__dirname, "..", "payment_events.json");
 // Nếu muốn dashboard cộng thêm thuế theo hệ số riêng, đặt ví dụ 1.05 hoặc 1.10. Mặc định giữ nguyên số Meta trả về.
 const META_SPEND_TAX_MULTIPLIER = Number(process.env.META_SPEND_TAX_MULTIPLIER || 1);
@@ -2842,6 +2844,46 @@ function dashboardParseAccountCardMap() {
     return map;
 }
 
+function dashboardExtractCardLast4(value) {
+    const text = typeof value === "string" ? value : JSON.stringify(value || "");
+    const patterns = [
+        /(?:Visa|Mastercard|MasterCard|card|thẻ|the)\D{0,30}(?:\*{2,}|x{2,}|…|\.{2,}|-)?\s*(\d{4})/i,
+        /(?:last4|last_4|last_four|card_last4)\D{0,20}(\d{4})/i,
+        /(?:\*{2,}|x{2,}|…|\.{2,})\s*(\d{4})/i
+    ];
+    for (const re of patterns) {
+        const m = text.match(re);
+        if (m && m[1]) return m[1];
+    }
+    return "";
+}
+
+async function dashboardHydrateAccountBillingDetails(accounts = []) {
+    if (!META_FETCH_BILLING_DETAILS || !META_ACCESS_TOKEN || !Array.isArray(accounts) || !accounts.length) return accounts;
+    const token = encodeURIComponent(META_ACCESS_TOKEN);
+    const out = [];
+    for (const acc of accounts) {
+        const id = dashboardNormalizeActId(acc.id || acc.accountId || "");
+        if (!id || acc.cardLast4) { out.push(acc); continue; }
+        try {
+            // Một số token/account trả funding_source_details, một số sẽ bị Meta chặn. Lỗi ở đây không được làm hỏng dashboard.
+            const url = `https://graph.facebook.com/v23.0/${id}?fields=id,name,account_id,funding_source,funding_source_details&access_token=${token}`;
+            const data = await dashboardFetchJson(url);
+            const cardLast4 = dashboardExtractCardLast4(data.funding_source_details || data.funding_source || data);
+            out.push({
+                ...acc,
+                name: acc.name && acc.name !== id ? acc.name : (data.name || acc.name || id),
+                cardLast4: cardLast4 || acc.cardLast4 || "",
+                fundingSourceReadable: cardLast4 ? `Visa/Mastercard ...${cardLast4}` : "",
+                billingRead: true
+            });
+        } catch (error) {
+            out.push({ ...acc, billingRead: false, billingError: error.message });
+        }
+    }
+    return out;
+}
+
 async function dashboardFetchGraphPages(url, maxPages = 20) {
     const rows = [];
     let nextUrl = url;
@@ -2922,7 +2964,8 @@ async function dashboardGetMetaAccounts() {
         if (errors.length) console.warn("Meta account discovery warnings:", errors.join(" | "));
     }
 
-    const accounts = Array.from(map.values()).filter(x => x.id);
+    let accounts = Array.from(map.values()).filter(x => x.id);
+    accounts = await dashboardHydrateAccountBillingDetails(accounts);
     dashboardCache.metaAccounts = { time: now, data: accounts };
     return accounts;
 }
@@ -3231,35 +3274,70 @@ function dashboardCardsForDate(dateKey, accounts = []) {
     return Array.from(cards).join(", ");
 }
 
-function dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey) {
+function dashboardBuildInternalDailyStats(monthKey) {
+    const targetMonth = String(monthKey || "").slice(0, 7);
+    const byDate = {};
+    const events = loadMessageEvents();
+    for (const e of events) {
+        if (e.direction && e.direction !== "customer") continue;
+        const key = dashboardDateKeyMeta(e.created_at || e.timestamp || e.updated_at || "");
+        if (!key || !key.startsWith(targetMonth)) continue;
+        if (!byDate[key]) byDate[key] = { total: 0, phoneCustomers: new Set(), zaloCustomers: new Set(), phones: new Set() };
+        byDate[key].total += 1;
+        const customerKey = e.customer_key || `${e.page_id || ""}:${e.sender_id || ""}`;
+        const phones = Array.isArray(e.phones) ? e.phones : extractPhonesFromText(e.text || "");
+        if (e.has_phone || phones.length) {
+            byDate[key].phoneCustomers.add(customerKey);
+            phones.forEach(p => byDate[key].phones.add(p));
+        }
+        const hasZalo = e.has_zalo || detectZaloFromText(e.text || "") || (Array.isArray(e.tags) && e.tags.includes("Zalo"));
+        if (hasZalo) byDate[key].zaloCustomers.add(customerKey);
+    }
+    const out = {};
+    for (const [day, val] of Object.entries(byDate)) {
+        out[day] = {
+            total: val.total,
+            hasPhone: val.phoneCustomers.size || val.phones.size,
+            zalo: val.zaloCustomers.size
+        };
+    }
+    return out;
+}
+
+function dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey, source = "meta") {
     const days = dashboardDaysInMonthFromKey(monthKey);
     const todayMeta = dashboardTodayKeyMeta(0);
     const currentDayNumber = Number(todayMeta.slice(8, 10));
     const targetMonth = monthKey.slice(0, 7);
     const lastDay = monthKey.slice(0, 7) === todayMeta.slice(0, 7) ? currentDayNumber : days;
     const byDate = {};
+    const internalDaily = dashboardBuildInternalDailyStats(monthKey);
 
     for (let i = 1; i <= days; i++) {
         const day = `${targetMonth}-${String(i).padStart(2, "0")}`;
         const accounts = metaDaily?.accountByDate?.[day] || [];
+        const direct = internalDaily[day] || { total: 0, hasPhone: 0, zalo: 0 };
         byDate[day] = {
             date: day,
             spend: Number(metaDaily?.byDate?.[day] || 0),
             accountSpendText: dashboardFormatAccountSpendList(accounts),
             accounts,
-            total: 0,
-            hasPhone: 0,
-            zalo: 0,
+            total: source === "pancake" ? 0 : Number(direct.total || 0),
+            hasPhone: source === "pancake" ? 0 : Number(direct.hasPhone || 0),
+            zalo: source === "pancake" ? 0 : Number(direct.zalo || 0),
             visa: dashboardCardsForDate(day, accounts)
         };
     }
 
-    for (const item of report) {
-        const key = dashboardDateKeyMeta(item.updated_at || item.inserted_at || "");
-        if (!key || !byDate[key]) continue;
-        byDate[key].total++;
-        if (item.has_phone) byDate[key].hasPhone++;
-        if (item.tags.includes("Zalo")) byDate[key].zalo++;
+    // Khi chọn Pancake, dùng report Pancake theo khách. Khi chọn Meta trực tiếp, ưu tiên message_events theo từng ngày để không bị lệch do khách cập nhật ngày khác.
+    if (source === "pancake") {
+        for (const item of report) {
+            const key = dashboardDateKeyMeta(item.updated_at || item.inserted_at || "");
+            if (!key || !byDate[key]) continue;
+            byDate[key].total++;
+            if (item.has_phone) byDate[key].hasPhone++;
+            if ((item.tags || []).includes("Zalo")) byDate[key].zalo++;
+        }
     }
 
     const rows = [];
@@ -3285,13 +3363,14 @@ function dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey) {
         return acc;
     }, { date: `Tổng tháng ${targetMonth}`, spend: 0, total: 0, hasPhone: 0, zalo: 0, visa: "", isTotal: true, accountSpendText: "" });
     totalRow.accountSpendText = dashboardFormatAccountSpendList(Object.values(totalAccountMap));
+    totalRow.accounts = Object.values(totalAccountMap);
     totalRow.visa = dashboardCardsForDate(todayMeta, Object.values(totalAccountMap));
 
     return { rows, totalRow, days, lastDay, targetMonth };
 }
 
-function dashboardRenderMetaMonthHtml({ limit, fullTotal, report, pancakeMeta, metaDaily, monthKey }) {
-    const monthData = dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey);
+function dashboardRenderMetaMonthHtml({ limit, fullTotal, report, pancakeMeta, metaDaily, monthKey, dataSource = "meta" }) {
+    const monthData = dashboardBuildMonthlyLeadRows(report, metaDaily, monthKey, dataSource);
     const metaTime = metaDaily?.fetchedAt ? new Date(metaDaily.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const pancakeTime = pancakeMeta?.fetchedAt ? new Date(pancakeMeta.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const metaNotice = metaDaily?.error ? `<div class="notice red-note">Meta Ads: ${dashboardEscapeHtml(metaDaily.error)}</div>` : "";
@@ -3310,9 +3389,9 @@ function dashboardRenderMetaMonthHtml({ limit, fullTotal, report, pancakeMeta, m
     `).join("");
 
     return `<!doctype html><html lang="vi"><head><meta charset="utf-8"/><meta name="viewport" content="width=device-width,initial-scale=1"/><title>Báo cáo tháng theo giờ Meta</title><style>
-        body{margin:0;font-family:"Times New Roman",Times,serif;background:#f8fafc;color:#111827}.wrap{max-width:1280px;margin:0 auto;padding:18px}.header{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}.header h1{margin:0;font-size:28px}.header p{margin:6px 0 0;color:#64748b}.btns a{display:inline-block;margin-left:8px;padding:10px 12px;border-radius:10px;background:#2563eb;color:white;text-decoration:none}.btns a.green{background:#16a34a}.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;background:white;padding:14px;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin-bottom:14px;border:1px solid #e2e8f0}.filter label{display:block;font-size:13px;color:#64748b;margin-bottom:5px}.filter input,.filter select{width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-family:"Times New Roman",Times,serif}.notice{background:#fff7ed;border:1px solid #fed7aa;padding:12px;border-radius:12px;margin:12px 0;color:#9a3412}.red-note{background:#fef2f2;border-color:#fecaca;color:#991b1b}.table-wrap{overflow-x:auto;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);border:1px solid #e2e8f0}table{width:100%;border-collapse:collapse;background:white;min-width:1100px}th,td{padding:12px;border-bottom:1px solid #e2e8f0;text-align:left;vertical-align:top}th{background:#e0f2fe;font-weight:800;position:sticky;top:0}td span{color:#64748b;font-size:13px}.account-cell{margin-bottom:8px}.account-name{font-size:16px;font-weight:800;color:#0f172a}.account-id{font-size:12px;color:#94a3b8;margin-top:2px}.account-spend{font-size:15px;margin-bottom:14px;min-height:28px}tbody tr:nth-child(even){background:#f8fafc}.row-total{background:#dcfce7!important;font-size:16px}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}.card{background:white;border-radius:16px;padding:16px;border:1px solid #e2e8f0;box-shadow:0 1px 4px rgba(15,23,42,.08)}.card .label{color:#475569}.card .num{font-size:28px;font-weight:800;margin-top:8px}@media(max-width:900px){.header{display:block}.btns{margin-top:12px}.btns a{margin:4px 4px 0 0}.filters,.summary{grid-template-columns:1fr}th,td{font-size:12px;padding:9px}}
+        body{margin:0;font-family:"Times New Roman",Times,serif;background:#f8fafc;color:#111827}.wrap{max-width:1280px;margin:0 auto;padding:18px}.header{display:flex;justify-content:space-between;gap:12px;align-items:center;margin-bottom:16px}.header h1{margin:0;font-size:28px}.header p{margin:6px 0 0;color:#64748b}.btns a{display:inline-block;margin-left:8px;padding:10px 12px;border-radius:10px;background:#2563eb;color:white;text-decoration:none}.btns a.green{background:#16a34a}.filters{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;background:white;padding:14px;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);margin-bottom:14px;border:1px solid #e2e8f0}.filter label{display:block;font-size:13px;color:#64748b;margin-bottom:5px}.filter input,.filter select{width:100%;box-sizing:border-box;padding:10px;border-radius:10px;border:1px solid #cbd5e1;background:#f8fafc;font-family:"Times New Roman",Times,serif}.notice{background:#fff7ed;border:1px solid #fed7aa;padding:12px;border-radius:12px;margin:12px 0;color:#9a3412}.red-note{background:#fef2f2;border-color:#fecaca;color:#991b1b}.table-wrap{overflow-x:auto;border-radius:16px;box-shadow:0 1px 4px rgba(15,23,42,.08);border:1px solid #e2e8f0}table{width:100%;border-collapse:collapse;background:white;min-width:1100px}th,td{padding:12px;border-bottom:1px solid #dbeafe;border-right:1px solid #cbd5e1;text-align:left;vertical-align:top}th:first-child,td:first-child{border-left:1px solid #cbd5e1}th{background:#dbeafe;border-bottom:2px solid #93c5fd;font-weight:800;position:sticky;top:0}td span{color:#64748b;font-size:13px}.account-cell{margin-bottom:8px}.account-name{font-size:16px;font-weight:800;color:#0f172a}.account-id{font-size:12px;color:#94a3b8;margin-top:2px}.account-spend{font-size:15px;margin-bottom:14px;min-height:28px}tbody tr:nth-child(even){background:#f8fafc}.row-total{background:#dcfce7!important;font-size:16px}.summary{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin:14px 0}.card{background:white;border-radius:16px;padding:16px;border:1px solid #e2e8f0;box-shadow:0 1px 4px rgba(15,23,42,.08)}.card .label{color:#475569}.card .num{font-size:28px;font-weight:800;margin-top:8px}@media(max-width:900px){.header{display:block}.btns{margin-top:12px}.btns a{margin:4px 4px 0 0}.filters,.summary{grid-template-columns:1fr}th,td{font-size:12px;padding:9px}}
     </style></head><body><div class="wrap"><div class="header"><div><h1>📅 Báo cáo tháng theo giờ tài khoản quảng cáo</h1><p>Tháng ${dashboardEscapeHtml(monthData.targetMonth)} | Múi giờ Meta: ${dashboardEscapeHtml(META_ACCOUNT_TIMEZONE)} | Reset khoảng 14h giờ VN nếu tài khoản dùng giờ Hoa Kỳ</p><p>Đã lấy ${fullTotal}/${limit} hội thoại Pancake | Pancake: ${dashboardEscapeHtml(pancakeTime)} ${pancakeMeta?.fromCache ? "(cache)" : "(mới)"} | Meta: ${dashboardEscapeHtml(metaTime)} ${metaDaily?.fromCache ? "(cache)" : "(mới)"}</p></div><div class="btns"><a class="green" href="/dashboard-meta-month?limit=${limit}">Tháng hiện tại</a><a href="/dashboard-today?time_basis=meta&limit=${limit}">Dashboard giờ Meta</a><a href="/dashboard-today?time_basis=pancake&limit=${limit}">Dashboard giờ VN</a></div></div>
-    <div class="filters"><div class="filter"><label>Số hội thoại lấy từ Pancake</label><select id="limitSelect" onchange="applyMonthFilters()"><option value="100" ${dashboardSelected("100", String(limit))}>100</option><option value="200" ${dashboardSelected("200", String(limit))}>200</option><option value="300" ${dashboardSelected("300", String(limit))}>300</option><option value="500" ${dashboardSelected("500", String(limit))}>500</option></select></div><div class="filter"><label>Tháng theo giờ Meta</label><input id="monthInput" type="month" value="${dashboardEscapeHtml(monthData.targetMonth)}" onchange="applyMonthFilters()"/></div><div class="filter"><label>Ghi chú</label><input value="Chi tiêu đã nhân hệ số thuế: ${dashboardEscapeHtml(String(META_SPEND_TAX_MULTIPLIER || 1))}" readonly/></div></div>${metaNotice}<div class="notice">Bảng này gom ngày theo <b>giờ tài khoản quảng cáo</b>, không theo giờ Việt Nam. Cột chi tiêu lấy từ Meta Insights; nếu cần cộng thuế, đặt biến Render <b>META_SPEND_TAX_MULTIPLIER</b>. Cột tên tài khoản QC tách riêng, tên hiển thị đậm và ID hiển thị nhỏ bên dưới; dữ liệu gom từ <b>META_AD_ACCOUNT_IDS</b> và tự quét các tài khoản token có quyền đọc. Có thể tắt tự quét bằng <b>META_AUTO_AD_ACCOUNTS=false</b>. Cột Visa ưu tiên dữ liệu thanh toán tự động từ <b>/payment-webhook</b>, sau đó tới <b>META_ACCOUNT_CARD_MAP</b> hoặc <b>META_CARD_LAST4</b>.</div>
+    <div class="filters"><div class="filter"><label>Số hội thoại lấy từ Pancake</label><select id="limitSelect" onchange="applyMonthFilters()"><option value="100" ${dashboardSelected("100", String(limit))}>100</option><option value="200" ${dashboardSelected("200", String(limit))}>200</option><option value="300" ${dashboardSelected("300", String(limit))}>300</option><option value="500" ${dashboardSelected("500", String(limit))}>500</option></select></div><div class="filter"><label>Tháng theo giờ Meta</label><input id="monthInput" type="month" value="${dashboardEscapeHtml(monthData.targetMonth)}" onchange="applyMonthFilters()"/></div><div class="filter"><label>Ghi chú</label><input value="Chi tiêu đã nhân hệ số thuế: ${dashboardEscapeHtml(String(META_SPEND_TAX_MULTIPLIER || 1))}" readonly/></div></div>${metaNotice}<div class="notice">Bảng này gom ngày theo <b>giờ tài khoản quảng cáo</b>, không theo giờ Việt Nam. Cột tin nhắn/SĐT/Zalo ở chế độ Meta lấy từ <b>message_events nội bộ</b>, không còn phụ thuộc giới hạn 500 hội thoại Pancake. Cột chi tiêu lấy từ Meta Insights; nếu cần cộng thuế, đặt biến Render <b>META_SPEND_TAX_MULTIPLIER</b>. Cột tên tài khoản QC tách riêng, tên hiển thị đậm và ID hiển thị nhỏ bên dưới; dữ liệu gom từ <b>META_AD_ACCOUNT_IDS</b> và tự quét các tài khoản token có quyền đọc. Có thể tắt tự quét bằng <b>META_AUTO_AD_ACCOUNTS=false</b>. Cột Visa ưu tiên dữ liệu thanh toán tự động từ <b>/payment-webhook</b>, sau đó tới <b>META_ACCOUNT_CARD_MAP</b> hoặc <b>META_CARD_LAST4</b>.</div>
     <div class="summary"><div class="card"><div class="label">Tổng chi tiêu tháng</div><div class="num">${dashboardMoney(monthData.totalRow.spend)}</div></div><div class="card"><div class="label">Tổng tin nhắn</div><div class="num">${monthData.totalRow.total}</div></div><div class="card"><div class="label">Tổng SĐT</div><div class="num">${monthData.totalRow.hasPhone}</div></div><div class="card"><div class="label">Tỷ lệ lấy số</div><div class="num">${dashboardRate(monthData.totalRow.hasPhone, monthData.totalRow.total)}%</div></div></div>
     <div class="table-wrap"><table><thead><tr><th>#</th><th>Ngày tháng theo giờ Meta</th><th>Tổng chi tiêu tất cả tài khoản</th><th>Tên tài khoản quảng cáo</th><th>Chi tiêu theo tài khoản</th><th>Số tin nhắn trong ngày</th><th>Số lượng SĐT</th><th>Số lượng Zalo</th><th>Thẻ Visa</th></tr></thead><tbody>${rowHtml}</tbody></table></div></div><script>function applyMonthFilters(){const limit=document.getElementById('limitSelect').value;const month=document.getElementById('monthInput').value;const p=new URLSearchParams();p.set('limit',limit);if(month)p.set('month',month);window.location.href='/dashboard-meta-month?'+p.toString();}</script></body></html>`;
 }
@@ -3649,8 +3728,9 @@ app.get('/dashboard-meta-month', async (req, res) => {
         const todayMeta = dashboardTodayKeyMeta(0);
         const until = monthKey === todayMeta.slice(0, 7) ? todayMeta : `${monthKey}-${String(days).padStart(2, "0")}`;
         const dateRange = { since, until, label: `${since} → ${until}`, basis: "meta" };
+        const dataSource = String(req.query.data_source || "meta").toLowerCase();
         const pancakeResult = await dashboardFetchPancakeCached(limit);
-        const fullReport = String(req.query.data_source || "meta").toLowerCase() === "pancake" ? pancakeResult.conversations.map(pancakeBuildCustomerRow) : buildInternalRowsFromMetaWebhook(limit);
+        const fullReport = dataSource === "pancake" ? pancakeResult.conversations.map(pancakeBuildCustomerRow) : buildInternalRowsFromMetaWebhook(1000000);
         const report = fullReport.filter(x => {
             const key = dashboardDateKeyMeta(x.updated_at || x.inserted_at || "");
             return key && key >= since && key <= until;
@@ -3662,7 +3742,8 @@ app.get('/dashboard-meta-month', async (req, res) => {
             report,
             pancakeMeta: pancakeResult,
             metaDaily,
-            monthKey: since
+            monthKey: since,
+            dataSource
         }));
     } catch (error) {
         console.error("Meta month dashboard error:", error);
@@ -3693,6 +3774,29 @@ app.get('/internal-customer-history', (req, res) => {
     const events = loadMessageEvents().filter(e => e.customer_key === targetKey || (!key && sender && e.sender_id === sender));
     res.setHeader("Content-Type", "text/plain; charset=utf-8");
     res.send(events.map(e => `[${e.created_at}] ${e.direction}: ${e.text}`).join("\n") || "Không có lịch sử nội bộ");
+});
+
+
+app.get('/meta-billing-debug', async (req, res) => {
+    try {
+        dashboardCache.metaAccounts = null;
+        const accounts = await dashboardGetMetaAccounts();
+        res.json({
+            ok: true,
+            fetchBillingDetails: META_FETCH_BILLING_DETAILS,
+            count: accounts.length,
+            accounts: accounts.map(a => ({
+                id: a.id,
+                name: a.name,
+                cardLast4: a.cardLast4 || "",
+                billingRead: a.billingRead,
+                billingError: a.billingError || "",
+                source: a.source || ""
+            }))
+        });
+    } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+    }
 });
 
 app.get('/meta-accounts-debug', async (req, res) => {
