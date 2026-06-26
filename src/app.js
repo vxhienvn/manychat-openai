@@ -2031,6 +2031,60 @@ function pancakeGetPhones(conv) {
         .filter(Boolean);
 }
 
+function dashboardNormalizeAdId(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return "";
+    const direct = raw.match(/^[0-9]{8,30}$/);
+    if (direct) return raw;
+    const match = raw.match(/[0-9]{8,30}/);
+    return match ? match[0] : "";
+}
+
+function pancakeExtractAdIds(source, depth = 0, out = new Set()) {
+    if (!source || depth > 6) return Array.from(out);
+
+    if (Array.isArray(source)) {
+        for (const item of source) pancakeExtractAdIds(item, depth + 1, out);
+        return Array.from(out);
+    }
+
+    if (typeof source !== "object") {
+        const id = dashboardNormalizeAdId(source);
+        if (id) out.add(id);
+        return Array.from(out);
+    }
+
+    for (const [key, value] of Object.entries(source)) {
+        const k = String(key || "").toLowerCase();
+        const looksLikeAdKey = [
+            "ad_id", "adid", "ad_ids", "facebook_ad_id", "fb_ad_id", "adid",
+            "source_ad_id", "origin_ad_id", "ref_ad_id"
+        ].some(name => k === name || k.endsWith(name));
+
+        if (looksLikeAdKey) {
+            if (Array.isArray(value)) {
+                for (const item of value) {
+                    const id = dashboardNormalizeAdId(item);
+                    if (id) out.add(id);
+                    if (item && typeof item === "object") pancakeExtractAdIds(item, depth + 1, out);
+                }
+            } else {
+                const id = dashboardNormalizeAdId(value);
+                if (id) out.add(id);
+                if (value && typeof value === "object") pancakeExtractAdIds(value, depth + 1, out);
+            }
+            continue;
+        }
+
+        // Một số payload Pancake lồng thông tin quảng cáo trong object ad/ad_info/referral.
+        if (["ad", "ads", "ad_info", "adinfo", "referral", "ref", "metadata", "extra", "extra_info"].includes(k)) {
+            pancakeExtractAdIds(value, depth + 1, out);
+        }
+    }
+
+    return Array.from(out);
+}
+
 function pancakeClassifyProduct(text = "") {
     const t = String(text).toLowerCase();
 
@@ -2131,7 +2185,7 @@ function pancakeBuildCustomerRow(conv) {
         hot_lead: pancakeIsHotLead(conv),
         tags,
         snippet,
-        ad_ids: conv.ad_ids || []
+        ad_ids: pancakeExtractAdIds(conv)
     };
 }
 
@@ -3125,7 +3179,7 @@ async function dashboardFetchMetaAdsCached(dateRange) {
 
     const accountCardMap = dashboardParseAccountCardMap();
     const accountKey = accounts.map(a => dashboardNormalizeActId(a.id)).join(",");
-    const key = `${accountKey}:${dateRange.since}:${dateRange.until}:multi-spend-positive:${META_SPEND_TAX_MULTIPLIER}`;
+    const key = `${accountKey}:${dateRange.since}:${dateRange.until}:multi-spend-positive-actions-3-9-1:${META_SPEND_TAX_MULTIPLIER}`;
     const cached = dashboardCache.meta.get(key);
     const now = Date.now();
     if (cached && now - cached.time < DASHBOARD_META_CACHE_TTL) {
@@ -3145,7 +3199,7 @@ async function dashboardFetchMetaAdsCached(dateRange) {
         const cardLast4 = String(accountInfo.cardLast4 || accountCardMap[account] || META_CARD_LAST4 || "");
         try {
             const adsUrl = `https://graph.facebook.com/v23.0/${account}/ads?fields=id,name,status,effective_status,configured_status,campaign{id,name},adset{id,name}&limit=500&access_token=${token}`;
-            const insightsUrl = `https://graph.facebook.com/v23.0/${account}/insights?level=ad&fields=ad_id,ad_name,spend,impressions,clicks,reach,cpc,cpm,ctr&time_range=${range}&limit=500&access_token=${token}`;
+            const insightsUrl = `https://graph.facebook.com/v23.0/${account}/insights?level=ad&fields=ad_id,ad_name,spend,impressions,clicks,reach,cpc,cpm,ctr,actions&time_range=${range}&limit=500&access_token=${token}`;
 
             const [adsData, insightsData] = await Promise.all([
                 dashboardFetchJson(adsUrl),
@@ -3192,7 +3246,8 @@ async function dashboardFetchMetaAdsCached(dateRange) {
                     reach: Number(item.reach || 0),
                     cpc: Number(item.cpc || 0),
                     cpm: Number(item.cpm || 0),
-                    ctr: Number(item.ctr || 0)
+                    ctr: Number(item.ctr || 0),
+                    messagingCount: dashboardExtractMetaMessagingCount(item)
                 };
             }
 
@@ -3495,7 +3550,7 @@ function dashboardAdRowClass(row) {
     return "row-low";
 }
 
-function dashboardBuildAdStats(report, metaData) {
+function dashboardBuildAdStats(report, metaData, supplementalReport = []) {
     const map = {};
     const allowedAdIds = new Set((metaData?.ads || []).map(ad => String(ad.adId)));
 
@@ -3518,6 +3573,7 @@ function dashboardBuildAdStats(report, metaData) {
             cpc: Number(ad.cpc || 0),
             cpm: Number(ad.cpm || 0),
             ctr: Number(ad.ctr || 0),
+            metaMessages: Number(ad.messagingCount || 0),
             total: 0,
             hasPhone: 0,
             noPhone: 0,
@@ -3530,34 +3586,49 @@ function dashboardBuildAdStats(report, metaData) {
         };
     }
 
-    // Pancake chỉ map hội thoại vào những QC đang có spend. Không tạo dòng QC lạ từ Pancake nữa.
-    for (const item of report) {
-        const ids = Array.isArray(item.ad_ids) ? item.ad_ids.map(String).filter(Boolean) : [];
+    // Map hội thoại vào những QC đang có spend.
+    // 3.9.1: dùng cả nguồn đang xem và Pancake bổ sung để tránh tình trạng Meta Direct chưa lưu đủ ad_id/SĐT.
+    const mergedItems = [];
+    const seenLeadKeys = new Set();
+    for (const item of [...(report || []), ...(supplementalReport || [])]) {
+        const ids = Array.isArray(item.ad_ids) ? item.ad_ids.map(dashboardNormalizeAdId).filter(Boolean) : [];
         const matchedIds = ids.filter(id => allowedAdIds.has(id));
         if (!matchedIds.length) continue;
-
         for (const adId of matchedIds) {
-            const row = map[adId];
-            if (!row) continue;
-            row.total++;
-            if (item.has_phone) row.hasPhone++;
-            if (!item.has_phone) row.noPhone++;
-            if (item.tags.includes("Zalo")) row.zalo++;
-            if (item.tags.includes("Đã Gọi")) row.called++;
-            if (item.hot_lead && !item.has_phone) row.hotNoPhone++;
-            const product = item.product || "Khác";
-            row.productCount[product] = (row.productCount[product] || 0) + 1;
-            dashboardAddCounts(row.tagCount, item.tags);
-            dashboardAddCounts(row.staffCount, item.tags.filter(tag => DASHBOARD_STAFF_TAGS.includes(tag)));
+            const leadKey = `${adId}:${item.conversation_id || item.sender_id || item.name || item.snippet || Math.random()}`;
+            if (seenLeadKeys.has(leadKey)) continue;
+            seenLeadKeys.add(leadKey);
+            mergedItems.push({ adId, item });
         }
+    }
+
+    for (const { adId, item } of mergedItems) {
+        const row = map[adId];
+        if (!row) continue;
+        row.total++;
+        if (item.has_phone) row.hasPhone++;
+        if ((item.tags || []).includes("Zalo") || item.has_zalo) row.zalo++;
+        if ((item.tags || []).includes("Đã Gọi")) row.called++;
+        if (item.hot_lead && !item.has_phone) row.hotNoPhone++;
+        const product = item.product || "Khác";
+        row.productCount[product] = (row.productCount[product] || 0) + 1;
+        dashboardAddCounts(row.tagCount, item.tags || []);
+        dashboardAddCounts(row.staffCount, (item.tags || []).filter(tag => DASHBOARD_STAFF_TAGS.includes(tag)));
+    }
+
+    for (const row of Object.values(map)) {
+        // Nếu Pancake/Webhook chưa map được lead theo ad_id, vẫn hiển thị số tin nhắn từ Meta Insights.
+        // SĐT/Zalo vẫn lấy từ dữ liệu hội thoại khi có.
+        row.total = Math.max(Number(row.total || 0), Number(row.metaMessages || 0));
+        row.noPhone = Math.max(0, Number(row.total || 0) - Number(row.hasPhone || 0));
     }
 
     return Object.values(map).sort((a, b) => Number(b.spend || 0) - Number(a.spend || 0));
 }
 
-function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, dateRange, dataSource = "meta", compareStats = null }) {
+function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, dateRange, dataSource = "meta", compareStats = null, pancakeReport = [] }) {
     const stats = dashboardBuildStats(report);
-    const adsStats = dashboardBuildAdStats(report, metaData);
+    const adsStats = dashboardBuildAdStats(report, metaData, dataSource === "pancake" ? [] : pancakeReport);
     const currentLimit = String(limit || 500);
     const currentProduct = dashboardProductParamFromName(dashboardNormalizeProduct(req.query.product || "all"));
     const currentView = dashboardGetViewValue(req, mode);
@@ -3648,7 +3719,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AIGUKA Dashboard 3.8</title>
+    <title>AIGUKA Dashboard 3.9.1</title>
     <style>
         body { margin:0; font-family:"Times New Roman", Times, serif; font-size:14px; background:#f8fafc; color:#111827; }
         .wrap { max-width:1480px; margin:0 auto; padding:18px; }
@@ -3787,7 +3858,8 @@ async function dashboardHandler(req, res, mode = "all") {
             metaData,
             dateRange: filtered.dateRange,
             dataSource: source,
-            compareStats
+            compareStats,
+            pancakeReport: pancakeRows
         }));
     } catch (error) {
         console.error("Dashboard error:", error);
