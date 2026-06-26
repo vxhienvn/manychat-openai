@@ -3401,8 +3401,20 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     const metaTime = metaData?.fetchedAt ? new Date(metaData.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const pancakeTime = pancakeMeta?.fetchedAt ? new Date(pancakeMeta.fetchedAt).toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' }) : "Chưa có";
     const metaNotice = metaData?.error ? `<div class="notice red-note">Meta Ads: ${dashboardEscapeHtml(metaData.error)}</div>` : "";
-    const pancakeNotice = pancakeMeta?.error ? `<div class="notice red-note">Pancake API đang lỗi: ${dashboardEscapeHtml(pancakeMeta.error)}. Dashboard vẫn chạy bằng dữ liệu Meta trực tiếp/cache.</div>` : "";
+    const pancakeNotice = pancakeMeta?.error
+        ? `<div class="notice red-note"><b>⚠ Pancake đang lỗi hoặc không phản hồi.</b><br/>Lỗi: ${dashboardEscapeHtml(pancakeMeta.error)}<br/>Dashboard vẫn chạy bằng dữ liệu <b>Meta trực tiếp</b>${pancakeMeta?.fromCache ? " và cache Pancake gần nhất" : ""}. Nhân viên vẫn nên kiểm tra Pancake riêng nếu cần thao tác CRM.</div>`
+        : `<div class="notice green-note"><b>✓ Pancake đang kết nối bình thường.</b> Cập nhật lúc ${dashboardEscapeHtml(pancakeTime)}${pancakeMeta?.fromCache ? " (đang dùng cache)" : ""}.</div>`;
     const compareNotice = compareStats ? `<div class="notice"><b>So sánh Meta trực tiếp / Pancake:</b> Hội thoại ${compareStats.meta_total}/${compareStats.pancake_total}, SĐT ${compareStats.meta_phone}/${compareStats.pancake_phone}, Zalo ${compareStats.meta_zalo}/${compareStats.pancake_zalo}.</div>` : "";
+    const sourceBadge = currentDataSource === "pancake"
+        ? `<span class="source-badge source-pancake">🟠 Pancake</span>`
+        : currentDataSource === "compare"
+            ? `<span class="source-badge source-compare">🔵 So sánh Meta/Pancake</span>`
+            : `<span class="source-badge source-meta">🟢 Meta Direct</span>`;
+    const sourceHint = currentDataSource === "meta"
+        ? `<div class="notice green-note">${sourceBadge}<b>Đang xem dữ liệu Meta trực tiếp.</b> Dữ liệu lấy từ kho Webhook nội bộ, không giới hạn 100/300/500 hội thoại.</div>`
+        : currentDataSource === "compare"
+            ? `<div class="notice">${sourceBadge}<b>Đang so sánh hai nguồn.</b> Meta lấy toàn bộ dữ liệu nội bộ theo khoảng ngày; giới hạn 100/300/500 chỉ áp dụng cho Pancake.</div>`
+            : `<div class="notice">${sourceBadge}<b>Đang xem dữ liệu Pancake.</b> Giới hạn hội thoại Pancake áp dụng theo lựa chọn 100/300/500.</div>`;
 
     const adsRows = adsStats.map((x, index) => `
         <tr class="${dashboardAdRowClass(x)}">
@@ -3495,7 +3507,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         th { background:#e0f2fe; color:#0f172a; font-weight:800; position:sticky; top:0; } td span { color:#64748b; font-size:13px; }
         tbody tr:nth-child(even){background:#f8fafc;} .row-good{background:#dcfce7!important;} .row-mid{background:#fef9c3!important;} .row-low{background:#ffe4e6!important;} .row-hot{background:#ffedd5!important;} .row-phone{background:#ecfdf5!important;} .row-normal{background:#f8fafc;}
         .products { display:grid; grid-template-columns:repeat(6,minmax(0,1fr)); gap:10px; } .product { background:white; border-radius:14px; padding:13px; box-shadow:0 1px 4px rgba(15,23,42,.08); border:1px solid #e2e8f0; }
-        .product b{display:block; font-size:22px; margin-top:6px;} .notice{background:#fff7ed; border:1px solid #fed7aa; padding:12px; border-radius:12px; margin-top:12px; color:#9a3412;} .red-note{background:#fef2f2; border-color:#fecaca; color:#991b1b;}
+        .product b{display:block; font-size:22px; margin-top:6px;} .notice{background:#fff7ed; border:1px solid #fed7aa; padding:12px; border-radius:12px; margin-top:12px; color:#9a3412;} .red-note{background:#fef2f2; border-color:#fecaca; color:#991b1b;} .green-note{background:#ecfdf5; border-color:#bbf7d0; color:#166534;} .source-badge{display:inline-block; padding:6px 10px; border-radius:999px; font-weight:800; font-size:13px; margin-right:6px;} .source-meta{background:#dcfce7; color:#166534;} .source-pancake{background:#ffedd5; color:#9a3412;} .source-compare{background:#dbeafe; color:#1d4ed8;}
         .legend{display:flex; flex-wrap:wrap; gap:8px; margin:8px 0 10px; color:#475569; font-size:13px;} .chip{padding:6px 10px; border-radius:999px; border:1px solid #e2e8f0; background:white;} .chip.good{background:#dcfce7;} .chip.mid{background:#fef9c3;} .chip.low{background:#ffe4e6;}
         .adv { display:none; }
         @media (max-width:900px){.grid{grid-template-columns:repeat(2,1fr);} .products{grid-template-columns:repeat(2,1fr);} .filters{grid-template-columns:repeat(1,1fr);} .header{display:block;} .btns{margin-top:12px;} .btns a{margin:4px 4px 0 0;} th,td{font-size:12px;padding:9px;} .section-head{display:block;} .section-actions{margin-top:8px;} }
@@ -3521,8 +3533,8 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     </div>
 
     <div class="filters">
-        <div class="filter"><label>Số hội thoại lấy</label><select id="limitSelect" onchange="applyDashboardFilters()"><option ${dashboardSelected(100,currentLimit)} value="100">100</option><option ${dashboardSelected(300,currentLimit)} value="300">300</option><option ${dashboardSelected(500,currentLimit)} value="500">500</option></select></div>
-        <div class="filter"><label>Nguồn tin nhắn</label><select id="dataSourceSelect" onchange="applyDashboardFilters()"><option value="meta" ${dashboardSelected("meta",currentDataSource)}>Meta trực tiếp</option><option value="pancake" ${dashboardSelected("pancake",currentDataSource)}>Pancake</option><option value="compare" ${dashboardSelected("compare",currentDataSource)}>So sánh Meta/Pancake</option></select></div>
+        <div class="filter" id="pancakeLimitFilter" style="${currentDataSource === "meta" ? "display:none" : ""}"><label>Giới hạn hội thoại Pancake</label><select id="limitSelect" onchange="applyDashboardFilters()"><option ${dashboardSelected(100,currentLimit)} value="100">100</option><option ${dashboardSelected(300,currentLimit)} value="300">300</option><option ${dashboardSelected(500,currentLimit)} value="500">500</option></select></div>
+        <div class="filter"><label>Nguồn tin nhắn</label><select id="dataSourceSelect" onchange="togglePancakeLimitFilter(); applyDashboardFilters()"><option value="meta" ${dashboardSelected("meta",currentDataSource)}>Meta trực tiếp</option><option value="pancake" ${dashboardSelected("pancake",currentDataSource)}>Pancake</option><option value="compare" ${dashboardSelected("compare",currentDataSource)}>So sánh Meta/Pancake</option></select></div>
         <div class="filter"><label>Thống kê khách theo</label><select id="timeBasisSelect" onchange="applyDashboardFilters()"><option value="pancake" ${dashboardSelected("pancake",currentTimeBasis)}>Giờ Pancake / Việt Nam</option><option value="meta" ${dashboardSelected("meta",currentTimeBasis)}>Giờ tài khoản quảng cáo</option></select></div>
         <div class="filter"><label>Khoảng xem</label><select id="viewSelect" onchange="applyDashboardFilters()"><option value="today" ${dashboardSelected("today",currentView)}>Hôm nay</option><option value="yesterday" ${dashboardSelected("yesterday",currentView)}>Hôm qua</option><option value="last_7d" ${dashboardSelected("last_7d",currentView)}>7 ngày</option><option value="last_30d" ${dashboardSelected("last_30d",currentView)}>30 ngày</option><option value="date" ${dashboardSelected("date",currentView)}>Ngày cụ thể</option><option value="hot" ${dashboardSelected("hot",currentView)}>Khách nóng</option></select></div>
         <div class="filter"><label>Ngày cụ thể</label><input id="dateInput" type="date" value="${dashboardEscapeHtml(currentDate)}" onchange="document.getElementById('viewSelect').value='date'; applyDashboardFilters();" /></div>
@@ -3531,6 +3543,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     </div>
 
     ${metaNotice}
+    ${sourceHint}
     ${pancakeNotice}
     ${compareNotice}
     <div class="notice">Các chỉ số khách đang lọc theo <b>${dashboardEscapeHtml(dashboardTimeBasisLabel(currentTimeBasis))}</b>. Nếu chọn giờ Meta, ngày sẽ chạy theo ngày tài khoản quảng cáo chứ không theo ngày Việt Nam.</div>
@@ -3566,8 +3579,10 @@ function toggleAdsTable(){ const el=document.getElementById('adsTableWrap'); if(
 function toggleAdvancedBox(){ const el=document.getElementById('advancedBox'); if(!el)return; el.style.display=el.style.display==='block'?'none':'block'; localStorage.setItem('aiguka_adv_box',el.style.display); }
 function toggleAdvancedColumns(){ document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ const show=cb.checked; document.querySelectorAll('.'+cb.dataset.col).forEach(el=>{ el.style.display=show?'table-cell':'none'; }); localStorage.setItem('aiguka_'+cb.dataset.col,show?'1':'0'); }); }
 function restoreDashboardState(){ const ads=document.getElementById('adsTableWrap'); if(ads && localStorage.getItem('aiguka_ads_table')) ads.style.display=localStorage.getItem('aiguka_ads_table'); const box=document.getElementById('advancedBox'); if(box && localStorage.getItem('aiguka_adv_box')) box.style.display=localStorage.getItem('aiguka_adv_box'); document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ cb.checked=localStorage.getItem('aiguka_'+cb.dataset.col)==='1'; }); toggleAdvancedColumns(); }
-function applyDashboardFilters(){ const limit=document.getElementById('limitSelect').value; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; const timeBasis=document.getElementById('timeBasisSelect')?document.getElementById('timeBasisSelect').value:'pancake'; const dataSource=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; let path='/dashboard'; const params=new URLSearchParams(); params.set('limit',limit); params.set('time_basis',timeBasis); params.set('data_source',dataSource); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
+function togglePancakeLimitFilter(){ const source=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; const box=document.getElementById('pancakeLimitFilter'); if(box) box.style.display=(source==='meta')?'none':''; }
+function applyDashboardFilters(){ const limitEl=document.getElementById('limitSelect'); const limit=limitEl?limitEl.value:'500'; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; const timeBasis=document.getElementById('timeBasisSelect')?document.getElementById('timeBasisSelect').value:'pancake'; const dataSource=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; let path='/dashboard'; const params=new URLSearchParams(); if(dataSource!=='meta') params.set('limit',limit); params.set('time_basis',timeBasis); params.set('data_source',dataSource); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
 restoreDashboardState();
+togglePancakeLimitFilter();
 </script>
 </body></html>`;
 }
