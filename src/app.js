@@ -2,6 +2,7 @@ const express = require('express');
 const OpenAI = require('openai');
 const fs = require('fs');
 const path = require('path');
+const { loadProductRows, findBestProductRow, buildPriceRangeReply, buildProductIntroWithPrice } = require('./services/productSheetService');
 
 const app = express();
 app.use(express.json());
@@ -475,6 +476,19 @@ app.get('/', (req, res) => {
     res.send('Server OK');
 });
 
+app.get('/product-sheet-debug', async (req, res) => {
+    try {
+        const rows = await loadProductRows({ force: req.query.force === '1' });
+        res.json({
+            success: true,
+            count: rows.length,
+            rows: rows.slice(0, 20)
+        });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -719,14 +733,8 @@ THÔNG TIN QUẠT GUKA:
 - Quạt 8 cánh sải cánh thường xấp xỉ 1,7m, động cơ tầm 65W.
 - THAM KHẢO QUẠT GUKA
 
-- Quạt 8 cánh 1.7m, giá tại cửa hàng:
-  Giá thường từ 2-4 triệu tùy phiên bản.
-
-- Quạt 10 cánh 1.9m, giá tại cửa hàng:
-  Giá thường từ 3.9-8.5 triệu tùy phiên bản.
-
-- Dòng mạ vàng:
-  Giá cao hơn tùy chất liệu và động cơ.
+- Giá quạt chỉ được nói theo khoảng giá min-max khi có dữ liệu. Không báo giá cụ thể từng mẫu trong Messenger.
+- Nếu cần giá chi tiết, luôn xin SĐT/Zalo để sale tư vấn trực tiếp.
 
 COMBO / THIẾT BỊ:
 - Combo có loại phối sẵn và loại tự chọn theo nhu cầu.
@@ -743,12 +751,12 @@ QUY TẮC ƯU TIÊN TUYỆT ĐỐI:
 
 QUY TẮC:
 - Ưu tiên tư vấn có giá trị trước.
-- Nếu khách hỏi giá, xin mẫu, xin ảnh, hỏi "mẫu này bao nhiêu", "gửi mẫu", "cho xem mẫu": phải trả lời đúng sản phẩm trước, chỉ nói khoảng giá khi có dữ liệu chắc chắn, sau đó hỏi thêm tối đa 1 tiêu chí lọc mẫu.
+- Nếu khách hỏi giá, xin mẫu, xin ảnh, hỏi "mẫu này bao nhiêu", "gửi mẫu", "cho xem mẫu": chỉ được nói khoảng giá thấp nhất đến cao nhất nếu có dữ liệu chắc chắn, tuyệt đối không báo giá cụ thể từng mẫu, sau đó xin SĐT/Zalo để sale tư vấn.
 - Nếu khách muốn xem trên Messenger hoặc nói "gửi qua đây", "xem trên này", "cho xem ảnh", "xin mẫu", "xem mẫu", "tư vấn", "tv", "xin thông tin", "gửi mẫu": nói ngắn gọn rằng em gửi một số mẫu bán chạy bên dưới để anh/chị tham khảo. Server sẽ gửi carousel sau câu trả lời, không cần tự mô tả quá dài.
 - Không được nói "em gửi mẫu" nếu không có ý định gửi mẫu/slide ngay sau đó.
 - Không được tự nói lại nhiều lần rằng đã gửi mẫu; nếu đã nói gửi mẫu thì chỉ nói một lần ngắn gọn.
-- Không bịa giá chính xác nếu chưa có bảng giá. Có thể dùng khoảng giá tham khảo đã cho.
-- RIÊNG combo phòng tắm/thiết bị vệ sinh/nhà vệ sinh: tuyệt đối không tự nói giá chung 5-15 triệu hoặc 5-10 triệu. Chỉ nói có nhiều phân khúc từ cơ bản đến cao cấp, dòng cao cấp có thể lên tới vài chục triệu tùy số món, thương hiệu, chất liệu và mẫu chọn. Hãy mời khách chọn mẫu rồi báo giá chi tiết từng bộ.
+- Không bịa giá. Bất kể sản phẩm nào cũng chỉ nói khoảng giá min-max; không báo giá cụ thể từng model/mẫu/ảnh. Nếu chưa có dữ liệu giá thì xin SĐT/Zalo để chuyên viên báo lại.
+- Giá trên Messenger chỉ là khoảng giá tham khảo min-max để khách biết phân khúc. Giá chi tiết, khuyến mại, vận chuyển/lắp đặt để sale báo trực tiếp sau khi có SĐT/Zalo.
 - Nếu khách hỏi cả bếp và phòng tắm thì giữ đúng nhu cầu tổng hợp, không tự thu hẹp thành riêng sen vòi/bếp/quạt.
 - Không xin số điện thoại/Zalo quá 1 lần trong 3 lượt trả lời liên tiếp.
 - Nếu khách đã bỏ qua yêu cầu xin số thì tiếp tục tư vấn, không xin lại ngay.
@@ -1254,7 +1262,7 @@ async function sendCarouselByProduct(senderId, productType) {
     // Ưu tiên gửi ảnh trực tiếp thay vì generic template/carousel,
     // vì một số app Page/Messenger hiển thị template là "Tin nhắn này không hiển thị".
     // Ảnh trực tiếp ổn định hơn khi tư vấn khách thật.
-    return await sendImageGalleryByProduct(senderId, productType, 4);
+    return await sendImageGalleryByProduct(senderId, productType, 3);
 }
 
 
@@ -1790,6 +1798,31 @@ async function handleMessage(event) {
         return;
     }
 
+
+    // Khách hỏi giá: chỉ báo khoảng giá min -> max từ Google Sheet, không báo giá cụ thể từng mẫu.
+    if (isPriceRequest(customerMessage)) {
+        const productTypeForPrice = state.currentTopic || state.productType || detectProductType(customerMessage, currentHistoryText);
+        if (productTypeForPrice) {
+            state.currentTopic = productTypeForPrice;
+            state.productType = productTypeForPrice;
+
+            const productRow = await findBestProductRow(productTypeForPrice, customerMessage, currentHistoryText);
+            const reply = buildPriceRangeReply(productRow, productTypeForPrice);
+
+            conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${productTypeForPrice} | PRICE_RANGE_ONLY`);
+            conversations[senderId] = conversations[senderId].slice(-80);
+
+            state.stage = "GET_PHONE";
+            state.askedPhone = true;
+            state.lastPhoneAskTime = Date.now();
+            saveConversations(conversations);
+            saveCustomerStates(customerStates);
+
+            await sendMessage(senderId, reply);
+            return;
+        }
+    }
+
     // Flow tư vấn mới:
     // Khách hỏi sản phẩm cụ thể -> xin số nhẹ. Nếu chưa cho thì khai thác 1-2 câu hỏi.
     // Khi khách trả lời lại nhu cầu -> xin SĐT/Zalo để tư vấn và gửi mẫu.
@@ -1866,9 +1899,10 @@ async function handleMessage(event) {
             state.lastCarouselTime = Date.now();
             saveCustomerStates(customerStates);
 
-            const intro = buildCarouselIntro(productType);
+            const productRow = await findBestProductRow(productType, customerMessage, currentHistoryText);
+            const intro = productRow ? buildProductIntroWithPrice(productRow, productType) : buildCarouselIntro(productType);
             await sendMessage(senderId, intro);
-            conversations[senderId].push(`Bot: ${intro} | TIME:${Date.now()} | PRODUCT:${productType}`);
+            conversations[senderId].push(`Bot: ${intro} | TIME:${Date.now()} | PRODUCT:${productType} | SHEET_INTRO`);
 
             const sent = await sendCarouselByProduct(senderId, productType);
 
