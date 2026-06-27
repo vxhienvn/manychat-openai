@@ -1,37 +1,21 @@
-# AIGUKA v3.9.10
+# AIGUKA 3.9.11
+
+Bản cập nhật trên nền 3.9.10, tập trung sửa logic hội thoại thực tế trong Messenger.
 
 ## Deploy
 
 ```bash
 git add .
-git commit -m "AIGUKA 3.9.10 - Stable replies and photo request priority"
+git commit -m "AIGUKA 3.9.11 - Fix TBVS conversation intent"
 git push origin main
 ```
 
-## Test nhanh sau deploy
+## Test nhanh
 
-Gửi khách thử:
+- `Bồn cầu thông minh`
+- `bệt bao nhiêu`
+- `bon này bao tiền`
+- `Bắt đầu`
+- `Chậu giá bn`
 
-```text
-Lavabo này có những mẫu nào?
-Xin mẫu
-```
-
-Log cần thấy:
-
-```text
-AI-01-WEBHOOK
-AI-02-STATE
-AI-03-PHOTO-REQUEST
-AI-05-PRODUCT-ROW
-AI-06-PHOTO-RULE
-```
-
-## Admin takeover qua echo
-
-Mặc định bản này tắt takeover qua echo để tránh auto-reply quảng cáo làm bot im lặng.
-Muốn bật lại:
-
-```text
-AIGUKA_ENABLE_HUMAN_TAKEOVER_ECHO=1
-```
+Kỳ vọng: bot không còn nhầm bồn cầu sang combo/bồn tắm, không trả lời chung chung khi khách chỉ bấm Bắt đầu.

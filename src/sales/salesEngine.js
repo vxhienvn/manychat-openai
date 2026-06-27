@@ -53,8 +53,29 @@ function buildFollowUpMessage(productType) {
     return null;
 }
 
+function normalizeIntentText(text = "") {
+    return String(text || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d");
+}
+
+function isAmbiguousBonQuery(message) {
+    const raw = String(message || "").toLowerCase().trim();
+    const msg = normalizeIntentText(raw).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!msg) return false;
+    if (["bon cau", "bon ve sinh", "bet", "toilet", "wc", "bon tam", "lavabo", "bon rua mat", "chau lavabo"].some(w => msg.includes(w))) return false;
+    return /^(bon|bon nay|bon kia|bon do|bon gia|bon bao nhieu|bon nay bao nhieu|bồn|bồn này|bồn kia|bồn đó)$/i.test(raw) || /^(bon|bồn)\s+(nay|này|kia|do|đó|gia|giá|bn|bao nhieu|bao nhiêu)(\s|$)/i.test(raw);
+}
+
 function detectExplicitTopic(message) {
-    const msg = (message || "").toLowerCase();
+    const msg = normalizeIntentText(message || "");
+
+    if (isAmbiguousBonQuery(message)) return null;
+
+    const toiletWords = ["bon cau", "bon cau thong minh", "bon cau ai", "cau thong minh", "bon ve sinh", "bet", "toilet", "wc", "lien khoi", "uv", "khu khuan", "dieu khien giong noi"];
+    if (toiletWords.some(word => msg.includes(word))) return "toilet";
 
     const fanWords = [
         "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
@@ -79,7 +100,7 @@ function detectExplicitTopic(message) {
     const bathWords = [
         "combo", "phòng tắm", "phong tam", "nhà tắm", "nha tam",
         "nhà vệ sinh", "nha ve sinh", "thiết bị vệ sinh", "thiet bi ve sinh",
-        "tbvs", "bồn cầu", "bon cau", "bồn tắm", "bon tam", "gạch", "gach"
+        "tbvs", "bồn tắm", "bon tam", "gạch", "gach"
     ];
 
     const hasKitchen = kitchenWords.some(word => msg.includes(word));
@@ -188,6 +209,10 @@ function buildDontCallReply(productType) {
 }
 
 function buildCarouselIntro(productType) {
+    if (productType === "toilet") {
+        return "Dạ bồn cầu thông minh bên em có nhiều mẫu từ phổ thông đến cao cấp. Anh/chị cho em xin SĐT/Zalo để chuyên viên gửi mẫu đúng nhu cầu và báo giá nhanh ạ.";
+    }
+
     if (productType === "fan") {
         return "Dạ em gửi anh một số mẫu quạt bán chạy bên dưới để anh tham khảo nhé.";
     }
@@ -283,6 +308,10 @@ function detectIntent(customerMessage) {
 }
 
 function buildSampleIntro(productType) {
+    if (productType === "toilet") {
+        return "Dạ bồn cầu thông minh bên em có nhiều dòng AI, cảm ứng tự mở nắp, tự xả, tự phun rửa, sấy khô, UV khử khuẩn và điều khiển giọng nói. Anh/chị để lại SĐT/Zalo để bên em gửi đúng mẫu kèm khoảng giá ạ.";
+    }
+
     if (productType === "fan") {
         return "Dạ em gửi anh một số mẫu quạt bán chạy bên dưới để anh tham khảo nhé.";
     }
@@ -330,5 +359,7 @@ module.exports = {
     detectIntent,
     buildSampleIntro,
     buildAfterSamplePhoneAsk,
-    shouldBypassAI
+    shouldBypassAI,
+    isAmbiguousBonQuery,
+    normalizeIntentText
 };

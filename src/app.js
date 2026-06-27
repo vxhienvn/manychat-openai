@@ -514,8 +514,62 @@ app.get('/webhook', (req, res) => {
     return res.sendStatus(403);
 });
 
+function normalizeIntentText(text = "") {
+    return String(text || "")
+        .toLowerCase()
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "")
+        .replace(/đ/g, "d");
+}
+
+function isAmbiguousBonQuery(message) {
+    const raw = String(message || "").toLowerCase().trim();
+    const msg = normalizeIntentText(raw).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!msg) return false;
+
+    const clearToilet = ["bon cau", "bon ve sinh", "bet", "toilet", "wc", "cau thong minh"].some(w => msg.includes(w));
+    const clearBath = ["bon tam", "bathtub", "massage"].some(w => msg.includes(w));
+    const clearLavabo = ["lavabo", "bon rua mat", "chau rua mat", "chau lavabo"].some(w => msg.includes(w));
+    if (clearToilet || clearBath || clearLavabo) return false;
+
+    return /^(bon|bon nay|bon kia|bon do|bon gia|bon bao nhieu|bon nay bao nhieu|bon nay gia bao nhieu|bồn|bồn này|bồn kia|bồn đó)$/i.test(raw) ||
+        /^(bon|bồn)\s+(nay|này|kia|do|đó|gia|giá|bn|bao nhieu|bao nhiêu)(\s|$)/i.test(raw);
+}
+
+function buildAmbiguousBonReply() {
+    return "Dạ anh/chị đang hỏi bồn cầu, bồn tắm hay lavabo/bồn rửa mặt ạ? Anh/chị nhắn rõ giúp em để em gửi đúng mẫu và khoảng giá nhé 😊";
+}
+
+function isStarterOrUnclearMessage(message) {
+    const raw = String(message || "").trim();
+    const msg = normalizeIntentText(raw).replace(/[^a-z0-9\s]/g, " ").replace(/\s+/g, " ").trim();
+    if (!msg) return true;
+    const starters = ["bat dau", "start", "hi", "hello", "helo", "alo", "a lo", "chao", "xin chao", "ok", "o ke"];
+    if (starters.includes(msg)) return true;
+    if (raw.length <= 3 && !/[a-zA-ZÀ-ỹ0-9]/.test(raw.replace(/[?.!,]/g, ""))) return true;
+    if ([".", "..", "...", "?", "??", "???", "!", "👍"].includes(raw)) return true;
+    return false;
+}
+
+function buildStarterProductAsk() {
+    return "Dạ em chào anh/chị 😊 Anh/chị đang quan tâm nhóm sản phẩm nào ạ: quạt trần, thiết bị vệ sinh, bồn cầu thông minh, lavabo, sen vòi, bồn tắm, gạch men, thiết bị nhà bếp hay đèn trang trí? Nếu tiện anh/chị cho em xin SĐT/Zalo, bên em tư vấn trực tiếp và gửi mẫu nhanh hơn ạ.";
+}
+
+function buildSmartToiletReply() {
+    return "Dạ bên em có nhiều mẫu bồn cầu thông minh, bồn cầu AI từ phổ thông đến cao cấp ạ. Một số dòng có cảm ứng tự mở nắp, tự xả, tự phun rửa, sấy khô, tia UV khử khuẩn, điều khiển từ xa và điều khiển giọng nói. Anh/chị cho em xin SĐT hoặc Zalo, bên em gửi mẫu phù hợp kèm khoảng giá và tư vấn cụ thể cho mình nhé.";
+}
+
 function detectExplicitTopic(message) {
-    const msg = (message || "").toLowerCase();
+    const msg = normalizeIntentText(message || "");
+
+    if (isAmbiguousBonQuery(message)) return null;
+
+    const toiletWords = [
+        "bon cau", "bon cau thong minh", "bon cau ai", "cau thong minh",
+        "bon ve sinh", "bet", "toilet", "wc", "lien khoi", "tu dong xa",
+        "tu phun", "tu rua", "uv", "khu khuan", "dieu khien giong noi"
+    ];
+    if (toiletWords.some(word => msg.includes(word))) return "toilet";
 
     const fanWords = [
         "quạt", "quat", "quạt trần", "quat tran", "quạt đèn", "quat den",
@@ -540,7 +594,7 @@ function detectExplicitTopic(message) {
     const bathWords = [
         "combo", "phòng tắm", "phong tam", "nhà tắm", "nha tam",
         "nhà vệ sinh", "nha ve sinh", "thiết bị vệ sinh", "thiet bi ve sinh",
-        "tbvs", "bồn cầu", "bon cau", "bồn tắm", "bon tam", "gạch", "gach"
+        "tbvs", "bồn tắm", "bon tam", "gạch", "gach"
     ];
 
     const hasKitchen = kitchenWords.some(word => msg.includes(word));
@@ -759,6 +813,9 @@ QUY TẮC ƯU TIÊN TUYỆT ĐỐI:
 - Nếu khách hỏi hãng/thương hiệu/xuất xứ: phải trả lời trực tiếp trước. Thiết bị vệ sinh có TOTO, INAX, Viglacera, Huge, Caesar... và thương hiệu riêng GUKA. Không được hỏi ngược "mua combo hay mua lẻ" trước khi trả lời hãng.
 - Không được nói "em gửi ảnh/mẫu bên dưới", "em gửi catalogue" nếu server chưa chắc chắn gửi được ảnh ngay sau đó.
 - Riêng bồn cầu/bệt hiện chưa có bộ ảnh tự động riêng: không hứa gửi ảnh bên dưới, hãy xin SĐT/Zalo để chuyên viên gửi đúng mẫu.
+- Bồn cầu thông minh/bồn cầu AI/bệt/toilet/WC là nhóm riêng, không được trả lời thành combo phòng tắm. Trả lời ngắn về tính năng: cảm ứng tự mở nắp, tự xả, tự phun rửa, sấy khô, UV khử khuẩn, điều khiển từ xa/giọng nói; sau đó xin SĐT/Zalo để gửi đúng mẫu và khoảng giá.
+- Nếu khách chỉ nói mơ hồ "bồn", "bon", "bồn này", "bon này" thì phải hỏi lại: đang hỏi bồn cầu, bồn tắm hay lavabo/bồn rửa mặt; tuyệt đối không tự đoán là bồn tắm.
+- Nếu khách chỉ nhắn "Bắt đầu", "hi", "alo", ".", "?" hoặc ký tự khó hiểu: hỏi khách đang quan tâm quạt, thiết bị vệ sinh, bồn cầu, lavabo, sen vòi, bồn tắm, nhà bếp, gạch men hay đèn trang trí; có thể mời để lại SĐT/Zalo tư vấn nhanh.
 
 QUY TẮC:
 - Ưu tiên tư vấn có giá trị trước.
@@ -1457,14 +1514,14 @@ function buildBrandReply(productType) {
 }
 
 function isToiletOnlyQuestion(customerMessage) {
-    const msg = String(customerMessage || "").toLowerCase();
-    const toiletWords = ["bồn cầu", "bon cau", "bệt", "bet", "bồn vệ sinh", "bon ve sinh", "liền khối", "lien khoi"];
-    const comboWords = ["combo", "phòng tắm", "phong tam", "nhà tắm", "nha tam", "thiết bị vệ sinh", "thiet bi ve sinh"];
+    const msg = normalizeIntentText(customerMessage || "");
+    const toiletWords = ["bon cau", "bon cau thong minh", "bon cau ai", "cau thong minh", "bet", "bon ve sinh", "toilet", "wc", "lien khoi", "tu rua", "tu phun", "uv", "dieu khien giong noi"];
+    const comboWords = ["combo", "phong tam", "nha tam", "thiet bi ve sinh"];
     return toiletWords.some(word => msg.includes(word)) && !comboWords.some(word => msg.includes(word));
 }
 
 function buildToiletSampleFallback() {
-    return "Dạ bồn vệ sinh bên em có nhiều mẫu liền khối và nhiều phân khúc, từ dòng tiết kiệm đến cao cấp. Hiện ảnh bồn cầu chưa gửi tự động ổn định trên Messenger, anh để lại SĐT/Zalo để chuyên viên gửi đúng mẫu, đúng giá và gọi tư vấn nhanh hơn ạ.";
+    return buildSmartToiletReply();
 }
 
 function buildContactHandoverReply(customerMessage, state) {
@@ -1618,6 +1675,10 @@ function buildNeedQuestion(productType) {
         return "Dạ anh đang cần xem quạt cho phòng khoảng bao nhiêu m2 và thích kiểu hiện đại, mạ vàng hay quạt đèn ạ?";
     }
 
+    if (productType === "toilet") {
+        return "Dạ anh/chị đang cần bồn cầu thông minh cho nhà mới hay thay bồn cũ ạ? Anh/chị muốn dòng cơ bản dễ dùng hay dòng nhiều tính năng như tự rửa, sấy, UV, điều khiển giọng nói?";
+    }
+
     if (productType === "combo") {
         return "Dạ anh đang cần thiết bị vệ sinh cho nhà mới hay thay đồ cũ ạ? Anh muốn xem combo tầm giá cơ bản, trung cấp hay đẹp hơn chút?";
     }
@@ -1640,6 +1701,10 @@ function buildNeedQuestion(productType) {
 function buildPhoneAskAfterNeed(productType) {
     if (productType === "fan") {
         return "Dạ với nhu cầu này bên em cần gửi nhiều mẫu thực tế và báo giá theo từng phiên bản. Anh để lại SĐT/Zalo, bên em gửi mẫu quạt phù hợp và tư vấn nhanh cho anh nhé?";
+    }
+
+    if (productType === "toilet") {
+        return "Dạ bên em có nhiều mẫu bồn cầu thông minh và bồn cầu AI, mỗi mẫu khác nhau về tính năng và tầm giá. Anh/chị để lại SĐT/Zalo, bên em gửi đúng mẫu kèm khoảng giá và tư vấn nhanh cho mình nhé?";
     }
 
     if (productType === "combo" || productType === "faucet" || productType === "kitchen" || productType === "kitchen_bath") {
@@ -1944,6 +2009,44 @@ async function handleMessage(event) {
     saveConversations(conversations);
     saveCustomerStates(customerStates);
     aiTrace(senderId, "02-STATE", { topic: state.currentTopic, stage: state.stage, hasContact: state.hasContact, phoneRejected: state.phoneRejected, preferMessenger: state.preferMessenger });
+
+    // 3.9.11: Tin nhắn mở đầu/ký tự lạ phải hỏi nhóm sản phẩm, không đưa câu chung chung.
+    if (isStarterOrUnclearMessage(customerMessage)) {
+        const reply = buildStarterProductAsk();
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:unknown | STARTER_CLARIFY`);
+        conversations[senderId] = conversations[senderId].slice(-80);
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        await sendMessage(senderId, reply);
+        return;
+    }
+
+    // 3.9.11: Từ "bồn/bon" mơ hồ không được tự hiểu là bồn tắm hay combo.
+    if (isAmbiguousBonQuery(customerMessage)) {
+        const reply = buildAmbiguousBonReply();
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:ambiguous_bon | CLARIFY_BON`);
+        conversations[senderId] = conversations[senderId].slice(-80);
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        await sendMessage(senderId, reply);
+        return;
+    }
+
+    // 3.9.11: Bồn cầu thông minh là intent riêng; trả lời nhu cầu trước rồi mới xin SĐT/Zalo.
+    if (isToiletOnlyQuestion(customerMessage)) {
+        state.currentTopic = "toilet";
+        state.productType = "toilet";
+        state.stage = "GET_PHONE";
+        state.askedPhone = true;
+        state.lastPhoneAskTime = Date.now();
+        const reply = buildSmartToiletReply();
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:toilet | TOILET_SMART_REPLY`);
+        conversations[senderId] = conversations[senderId].slice(-80);
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        await sendMessage(senderId, reply);
+        return;
+    }
 
     // Nếu khách đã có SĐT/Zalo: không hỏi khai thác, không tư vấn lan man, chuyển chuyên viên.
     if (hasPhoneOrContact(customerMessage)) {

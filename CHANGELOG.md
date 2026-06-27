@@ -1,3 +1,13 @@
+
+## 3.9.11 - Conversation Intent Fix for TBVS
+
+- Cập nhật từ nền 3.9.10.
+- Sửa intent bồn cầu thông minh/bệt/toilet/WC thành nhóm riêng `toilet`, không nhầm sang combo phòng tắm.
+- Nếu khách chỉ nhắn mơ hồ `bồn/bon/bồn này/bon này`, bot hỏi lại bồn cầu, bồn tắm hay lavabo/bồn rửa mặt.
+- Nếu khách chỉ nhắn `Bắt đầu`, `hi`, `alo`, `.`, `?` hoặc ký tự khó hiểu, bot hỏi khách quan tâm nhóm sản phẩm nào và mời để lại SĐT/Zalo.
+- Trả lời bồn cầu thông minh tự nhiên hơn: AI, cảm ứng mở nắp, tự xả, tự phun rửa, sấy, UV khử khuẩn, điều khiển từ xa/giọng nói; sau đó xin SĐT/Zalo.
+- Cập nhật prompt và sales engine để ưu tiên sản phẩm cụ thể trước, combo là lựa chọn cuối.
+
 # AIGUKA CHANGELOG
 
 ## v3.9.10 - Stable replies, echo-safe, PHOTO request priority
