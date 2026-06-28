@@ -153,11 +153,15 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
         const referral = event ? getReferralInfoFromEvent(event) : {};
         const adId = referral.ad_id || "";
         const postId = extractPostIdFromEvent(event || {});
-        const finalProduct = productGroup || (customerStates[senderId]?.currentTopic || customerStates[senderId]?.productType || "");
+        const stateForLog = customerStates[senderId] || {};
+        const inferredProduct = detectExplicitTopic(text) || stateForLog.currentTopic || stateForLog.productType || stateForLog.lockedProduct || "";
+        const finalProduct = productGroup || toDbProductGroup(inferredProduct) || "";
+        const finalIntent = intent || detectCustomerIntent(text);
+        const finalPageId = pageId || event?.recipient?.id || stateForLog.lastPageId || "";
 
         const customer = await supabaseUpsertCustomer({
             senderId,
-            pageId: pageId || event?.recipient?.id || "",
+            pageId: finalPageId,
             phone: phones[0] || "",
             zalo: hasZalo ? "zalo" : "",
             productGroup: finalProduct,
@@ -167,7 +171,7 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
         const conversation = await supabaseGetOrCreateConversation({
             customerId: customer?.id,
             senderId,
-            pageId: pageId || event?.recipient?.id || "",
+            pageId: finalPageId,
             adId,
             postId,
             productGroup: finalProduct
@@ -179,7 +183,7 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
                 conversation_id: conversation?.id || null,
                 customer_id: customer?.id || null,
                 sender_id: String(senderId),
-                page_id: pageId || event?.recipient?.id || null,
+                page_id: finalPageId || null,
                 role,
                 message_type: messageType || "text",
                 text: String(text || ""),
@@ -188,7 +192,7 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
                 ad_id: adId || null,
                 post_id: postId || null,
                 product_group: finalProduct || null,
-                intent: intent || null
+                intent: finalIntent || null
             })
         });
         return { ok: true, customer, conversation, message: Array.isArray(rows) ? rows[0] : rows };
@@ -216,6 +220,182 @@ async function logBotEventToSupabase({ senderId = "", eventType = "", eventData 
     } catch (error) {
         console.error("Supabase bot event error:", error.message);
         return { ok: false, error: error.message };
+    }
+}
+
+
+// ===== AIGUKA 4.0.2 DURABLE PENDING REPLY QUEUE =====
+// Lý do: setTimeout trong RAM sẽ mất khi Render sleep/restart.
+// Vì vậy mọi lịch trả lời 5/10 phút phải được ghi vào Supabase.pending_replies.
+let pendingReplyWorkerRunning = false;
+
+async function supabaseGetCustomerAndConversationForSender(senderId, pageId = "") {
+    const customer = await supabaseUpsertCustomer({ senderId, pageId });
+    const conversation = await supabaseGetOrCreateConversation({
+        customerId: customer?.id,
+        senderId,
+        pageId
+    });
+    return { customer, conversation };
+}
+
+async function getOpenPendingReplies(senderId) {
+    if (!supabaseIsReady() || !senderId) return [];
+    const rows = await supabaseRequest(
+        `pending_replies?sender_id=eq.${encodeURIComponent(String(senderId))}&status=eq.pending&select=*&order=created_at.desc`,
+        { method: "GET" }
+    );
+    return Array.isArray(rows) ? rows : [];
+}
+
+async function scheduleDurablePendingReply({ senderId, pageId = "", dueAtMs, reason = "customer_message" }) {
+    if (!supabaseIsReady() || !senderId || !dueAtMs) return { skipped: true, reason: "supabase_disabled_or_missing_data" };
+
+    try {
+        const { customer, conversation } = await supabaseGetCustomerAndConversationForSender(senderId, pageId);
+        const dueAtIso = new Date(dueAtMs).toISOString();
+        const pendingRows = await getOpenPendingReplies(senderId);
+
+        if (pendingRows.length > 0) {
+            const keep = pendingRows[0];
+            // Hủy các pending dư để mỗi khách chỉ còn 1 lịch trả lời.
+            for (const extra of pendingRows.slice(1)) {
+                await supabaseRequest(`pending_replies?id=eq.${extra.id}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ status: "cancelled", processed_at: new Date().toISOString(), reason: "deduped_by_new_message" })
+                });
+            }
+            await supabaseRequest(`pending_replies?id=eq.${keep.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({
+                    page_id: pageId || keep.page_id || null,
+                    conversation_id: conversation?.id || keep.conversation_id || null,
+                    customer_id: customer?.id || keep.customer_id || null,
+                    due_at: dueAtIso,
+                    reason,
+                    status: "pending"
+                })
+            });
+            return { ok: true, action: "updated", id: keep.id, due_at: dueAtIso };
+        }
+
+        const inserted = await supabaseRequest("pending_replies", {
+            method: "POST",
+            body: JSON.stringify({
+                sender_id: String(senderId),
+                page_id: pageId || null,
+                conversation_id: conversation?.id || null,
+                customer_id: customer?.id || null,
+                due_at: dueAtIso,
+                status: "pending",
+                reason
+            })
+        });
+        const row = Array.isArray(inserted) ? inserted[0] : inserted;
+        return { ok: true, action: "inserted", id: row?.id, due_at: dueAtIso };
+    } catch (error) {
+        console.error("Durable pending schedule error:", senderId, error.message);
+        return { ok: false, error: error.message };
+    }
+}
+
+async function markPendingRepliesForSender(senderId, status, reason = "") {
+    if (!supabaseIsReady() || !senderId) return { skipped: true };
+    try {
+        const rows = await getOpenPendingReplies(senderId);
+        for (const row of rows) {
+            await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status, reason: reason || row.reason || null, processed_at: new Date().toISOString() })
+            });
+        }
+        return { ok: true, count: rows.length };
+    } catch (error) {
+        console.error("markPendingRepliesForSender error:", senderId, error.message);
+        return { ok: false, error: error.message };
+    }
+}
+
+async function processPendingReplyRow(row) {
+    if (!row || !row.sender_id) return;
+    const senderId = String(row.sender_id);
+
+    try {
+        await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status: "processing" })
+        });
+
+        const state = ensureCustomerState(senderId);
+        const now = Date.now();
+        const history = conversations[senderId] || [];
+        const historyText = history.join(" ");
+        const lastLine = String(history[history.length - 1] || "");
+
+        if (state.hasContact || hasPhoneOrContact(historyText)) {
+            state.hasContact = true;
+            saveCustomerStates(customerStates);
+            await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: "cancelled", reason: "customer_has_contact", processed_at: new Date().toISOString() })
+            });
+            return;
+        }
+
+        if (state.humanTakeoverUntil && now < Number(state.humanTakeoverUntil)) {
+            await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: "pending", due_at: new Date(Number(state.humanTakeoverUntil) + 1000).toISOString(), reason: "admin_takeover_active" })
+            });
+            return;
+        }
+
+        if (!lastLine.startsWith("Khách:")) {
+            await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: "cancelled", reason: "last_message_not_customer", processed_at: new Date().toISOString() })
+            });
+            return;
+        }
+
+        await processAiguka4Workflow(senderId, { recipient: { id: row.page_id || undefined } });
+        await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+            method: "PATCH",
+            body: JSON.stringify({ status: "sent", processed_at: new Date().toISOString() })
+        });
+    } catch (error) {
+        console.error("processPendingReplyRow error:", row?.sender_id, error.message);
+        try {
+            await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: "error", reason: String(error.message || error).slice(0, 500), processed_at: new Date().toISOString() })
+            });
+        } catch (_) {}
+    }
+}
+
+async function processDuePendingReplies(limit = 20) {
+    if (!supabaseIsReady()) return { skipped: true };
+    if (pendingReplyWorkerRunning) return { skipped: true, reason: "worker_running" };
+
+    pendingReplyWorkerRunning = true;
+    try {
+        const nowIso = new Date().toISOString();
+        const rows = await supabaseRequest(
+            `pending_replies?status=eq.pending&due_at=lte.${encodeURIComponent(nowIso)}&select=*&order=due_at.asc&limit=${Number(limit) || 20}`,
+            { method: "GET" }
+        );
+        const list = Array.isArray(rows) ? rows : [];
+        for (const row of list) {
+            await processPendingReplyRow(row);
+        }
+        if (list.length) console.log(`Durable pending worker processed ${list.length} replies`);
+        return { ok: true, count: list.length };
+    } catch (error) {
+        console.error("processDuePendingReplies error:", error.message);
+        return { ok: false, error: error.message };
+    } finally {
+        pendingReplyWorkerRunning = false;
     }
 }
 
@@ -658,14 +838,14 @@ const humanTakeoverTimers = new Map();
 const customerReplyTimers = new Map();
 
 app.get('/', (req, res) => {
-    res.send('Server OK - AIGUKA v4.0 Workflow Engine + Welcome Showcase');
+    res.send('Server OK - AIGUKA 4.0.4 Reply Engine Guard');
 });
 
 app.get('/healthz', (req, res) => {
     res.status(200).json({
         ok: true,
         service: 'AIGUKA',
-        version: '4.0-LTS-Supabase-Logger',
+        version: '4.0.4-Reply-Engine-Guard',
         time: new Date().toISOString()
     });
 });
@@ -680,6 +860,30 @@ app.get('/supabase-health', async (req, res) => {
     } catch (error) {
         return res.status(500).json({ ok: false, enabled: true, error: error.message });
     }
+});
+
+
+app.get('/pending-replies-health', async (req, res) => {
+    if (!supabaseIsReady()) {
+        return res.status(200).json({ ok: false, enabled: SUPABASE_ENABLED, error: 'Supabase env is missing or disabled' });
+    }
+    try {
+        const pending = await supabaseRequest('pending_replies?status=eq.pending&select=id,sender_id,due_at,reason&order=due_at.asc&limit=10', { method: 'GET' });
+        const due = await processDuePendingReplies(10);
+        return res.json({ ok: true, pending_sample: pending, processed_due: due });
+    } catch (error) {
+        return res.status(500).json({ ok: false, error: error.message });
+    }
+});
+
+app.get('/reply-engine-health', (req, res) => {
+    const samples = [
+        { text: 'xin giá quạt', product: detectExplicitTopic('xin giá quạt'), intent: detectCustomerIntent('xin giá quạt'), score: leadScoreForMessage('xin giá quạt') },
+        { text: 'báo giá rồi gửi số', product: detectExplicitTopic('báo giá rồi gửi số'), intent: detectCustomerIntent('báo giá rồi gửi số'), score: leadScoreForMessage('báo giá rồi gửi số') },
+        { text: 'xem đồ bếp', product: detectExplicitTopic('xem đồ bếp'), intent: detectCustomerIntent('xem đồ bếp'), score: leadScoreForMessage('xem đồ bếp') },
+        { text: 'bồn cầu màu cam chức năng thế nào', product: detectExplicitTopic('bồn cầu màu cam chức năng thế nào'), intent: detectCustomerIntent('bồn cầu màu cam chức năng thế nào'), score: leadScoreForMessage('bồn cầu màu cam chức năng thế nào') }
+    ];
+    res.json({ ok: true, version: '4.0.4-Reply-Engine-Guard', samples });
 });
 
 app.get('/product-sheet-debug', async (req, res) => {
@@ -797,7 +1001,7 @@ function detectExplicitTopic(message) {
     ];
 
     const kitchenWords = [
-        "bếp", "bep", "thiết bị bếp", "thiet bi bep",
+        "bếp", "bep", "đồ bếp", "do bep", "thiết bị bếp", "thiet bi bep",
         "bếp từ", "bep tu", "hút mùi", "hut mui", "máy hút mùi", "may hut mui",
         "chậu rửa bát", "chau rua bat", "vòi bếp", "voi bep", "tủ bếp", "tu bep"
     ];
@@ -1111,11 +1315,16 @@ async function sendMessage(senderId, text) {
     }
 
     // Supabase logger: lưu tin bot sau khi Facebook xác nhận gửi thành công.
+    const st = customerStates[senderId] || {};
+    if (st) { st.lastBotReply = text; saveCustomerStates(customerStates); }
     logMessageToSupabase({
         senderId,
+        pageId: st.lastPageId || "",
         role: "bot",
         text,
         messageType: "text",
+        productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
+        intent: "bot_reply",
         raw: { facebook_status: response.status, facebook_result: result }
     }).catch(err => console.error("Supabase bot text log error:", err.message));
 }
@@ -1148,11 +1357,15 @@ async function sendTemplate(senderId, elements, logName) {
         throw new Error(`${logName} failed: ${response.status} - ${result}`);
     }
 
+    const st = customerStates[senderId] || {};
     logMessageToSupabase({
         senderId,
+        pageId: st.lastPageId || "",
         role: "bot",
         text: `[template:${logName || "generic"}]`,
         messageType: "template",
+        productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
+        intent: "bot_template",
         raw: { elements, facebook_status: response.status, facebook_result: result }
     }).catch(err => console.error("Supabase bot template log error:", err.message));
 }
@@ -1549,10 +1762,18 @@ async function sendImageMessage(senderId, imageUrl, logName = "Image message") {
 }
 
 function getStaticProductItems(productType) {
+    // AIGUKA 4.0.3: tuyệt đối không dùng ảnh nhóm khác làm fallback.
+    // Lỗi cũ: kitchen fallback sang faucet khiến khách hỏi đồ bếp nhưng nhận sen/lavabo.
     if (productType === "combo") return PRODUCT_IMAGE_GALLERIES.combo || [];
     if (productType === "fan") return PRODUCT_IMAGE_GALLERIES.fan || [];
-    if (productType === "faucet" || productType === "kitchen") return PRODUCT_IMAGE_GALLERIES.faucet || [];
-    if (productType === "kitchen_bath") return (PRODUCT_IMAGE_GALLERIES.combo || []).slice(0, 2).concat((PRODUCT_IMAGE_GALLERIES.faucet || []).slice(0, 2));
+    if (productType === "faucet") return PRODUCT_IMAGE_GALLERIES.faucet || [];
+    if (productType === "kitchen") return PRODUCT_IMAGE_GALLERIES.kitchen || [];
+    if (productType === "toilet") return PRODUCT_IMAGE_GALLERIES.toilet || [];
+    if (productType === "vanity") return PRODUCT_IMAGE_GALLERIES.vanity || [];
+    if (productType === "kitchen_bath") {
+        return (PRODUCT_IMAGE_GALLERIES.kitchen || []).slice(0, 5)
+            .concat((PRODUCT_IMAGE_GALLERIES.combo || []).slice(0, 5));
+    }
     return [];
 }
 
@@ -1587,6 +1808,89 @@ function isPriceRequest(message = "") {
     ].some(word => msg.includes(word));
 }
 
+function detectCustomerIntent(message = "") {
+    const msg = normalizeIntentText(message);
+    if (hasPhoneOrContact(message)) return "phone_provided";
+    if (isPriceFirstObjection(message)) return "price_first";
+    if (isPriceRequest(message)) return "ask_price";
+    if (isAskMoreImagesMessage(message) || shouldSendCarousel(message)) return "ask_more_images";
+    if (["chuc nang", "tinh nang", "cong dung", "tu rua", "tu xa", "say", "uv", "dieu khien"].some(w => msg.includes(w))) return "ask_features";
+    if (["dia chi", "o dau", "showroom", "cua hang"].some(w => msg.includes(w))) return "ask_address";
+    if (["bao hanh", "bh", "doi tra", "loi"].some(w => msg.includes(w))) return "ask_warranty";
+    if (["ship", "giao", "van chuyen", "lap dat"].some(w => msg.includes(w))) return "ask_delivery";
+    return "general";
+}
+
+function toDbProductGroup(productType = "") {
+    const t = String(productType || "").toLowerCase();
+    if (t === "fan") return "fan";
+    if (t === "kitchen") return "kitchen";
+    if (t === "toilet") return "toilet";
+    if (t === "vanity") return "vanity";
+    if (t === "faucet") return "faucet";
+    if (t === "combo") return "combo";
+    if (t === "kitchen_bath") return "kitchen_bath";
+    return t || null;
+}
+
+function buildFeatureReply(productType) {
+    if (productType === "toilet") {
+        return "Dạ bồn cầu thông minh thường có các chức năng như tự xả, phun rửa, sấy khô, sưởi ấm bệ ngồi, khử mùi/UV tùy phiên bản và điều khiển từ xa ạ. Mẫu màu cam có thể khác cấu hình theo từng lô, anh/chị để lại SĐT/Zalo để bên em gửi đúng mẫu và thông số chi tiết nhé.";
+    }
+    if (productType === "kitchen") {
+        return "Dạ đồ bếp bên em có bếp từ, hút mùi, chậu rửa bát và vòi bếp. Mỗi bộ khác nhau về mặt kính, công suất, mâm từ và bảo hành. Anh/chị muốn xem nhóm bếp từ - hút mùi hay chậu vòi bếp trước ạ?";
+    }
+    return "Dạ mỗi mẫu sẽ khác nhau về chất liệu, kích thước, tính năng và phân khúc giá. Anh/chị nhắn rõ mẫu đang xem hoặc để lại SĐT/Zalo, bên em gửi đúng thông số và báo giá chi tiết nhé.";
+}
+
+function isProductBrowseRequest(message = "") {
+    const msg = normalizeIntentText(message);
+    const hasBrowse = ["xem", "gui", "gửi", "mau", "mẫu", "anh", "ảnh", "hinh", "hình", "catalog"].some(w => msg.includes(normalizeIntentText(w)));
+    return hasBrowse && Boolean(detectExplicitTopic(message));
+}
+
+async function updateSupabaseConversationMetadata(senderId, patch = {}) {
+    if (!supabaseIsReady() || !senderId) return;
+    try {
+        const rows = await supabaseRequest(`conversations?sender_id=eq.${encodeURIComponent(String(senderId))}&status=eq.open&select=id&order=last_message_at.desc&limit=1`, { method: "GET" });
+        const conv = Array.isArray(rows) ? rows[0] : null;
+        if (!conv?.id) return;
+        await supabaseRequest(`conversations?id=eq.${conv.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    } catch (error) {
+        console.error("updateSupabaseConversationMetadata error:", error.message);
+    }
+}
+
+async function updateSupabaseCustomerState(senderId, state = {}, patch = {}) {
+    if (!supabaseIsReady() || !senderId) return;
+    try {
+        const customer = await supabaseUpsertCustomer({ senderId, pageId: state.lastPageId || "", productGroup: toDbProductGroup(state.currentTopic || state.productType || "") || "" });
+        if (!customer?.id) return;
+        await supabaseRequest("customer_states?on_conflict=customer_id", {
+            method: "POST",
+            headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+            body: JSON.stringify({
+                customer_id: customer.id,
+                product_lock: toDbProductGroup(state.lockedProduct || state.currentTopic || state.productType || ""),
+                last_ad_id: state.lastAdId || null,
+                last_post_id: state.lastPostId || null,
+                welcome_slide_sent: Boolean(state.welcomeShowcases && Object.keys(state.welcomeShowcases).length),
+                slide_count: Number(state.sampleSentCount || 0),
+                price_sent: Boolean(state.priceSent),
+                phone_requested_count: Number(state.phoneRequestedCount || state.phoneAskCount || (state.askedPhone ? 1 : 0) || 0),
+                phone_detected: Boolean(state.hasContact),
+                admin_taken_over: Boolean(state.humanTakeoverUntil && Date.now() < Number(state.humanTakeoverUntil)),
+                bot_paused_until: state.humanTakeoverUntil ? new Date(Number(state.humanTakeoverUntil)).toISOString() : null,
+                last_bot_reply: state.lastBotReply || null,
+                state: { ...state, ...patch },
+                updated_at: new Date().toISOString()
+            })
+        });
+    } catch (error) {
+        console.error("updateSupabaseCustomerState error:", error.message);
+    }
+}
+
 function shouldHandleEchoAsHumanAdmin(event) {
     // 3.9.10: mặc định KHÔNG coi echo là admin takeover nữa.
     // Một số auto-reply/ads form của Meta cũng gửi echo và làm bot im lặng 10 phút.
@@ -1607,6 +1911,49 @@ function buildMessengerElements(items, titlePrefix = "Mẫu") {
     })).filter(x => x.image_url);
 }
 
+function productScopeTerms(productType = "") {
+    const t = String(productType || "").toLowerCase();
+    if (t === "kitchen") return ["bếp", "bep", "hút mùi", "hut mui", "chậu rửa bát", "chau rua bat", "vòi bếp", "voi bep", "kitchen", "yamato", "bếp từ", "bep tu"];
+    if (t === "fan") return ["quạt", "quat", "fan", "cánh", "canh", "guka"];
+    if (t === "toilet") return ["bồn cầu", "bon cau", "toilet", "wc", "bệt", "bet", "thông minh", "thong minh"];
+    if (t === "vanity") return ["tủ chậu", "tu chau", "tủ lavabo", "tu lavabo", "gương", "guong", "vanity"];
+    if (t === "faucet") return ["sen", "vòi", "voi", "lavabo", "chậu rửa", "chau rua", "faucet"];
+    if (t === "combo") return ["combo", "phòng tắm", "phong tam", "thiết bị vệ sinh", "thiet bi ve sinh", "bathroom"];
+    return [];
+}
+
+function productNegativeScopeTerms(productType = "") {
+    const t = String(productType || "").toLowerCase();
+    if (t === "kitchen") return ["sen", "lavabo", "bồn cầu", "bon cau", "phòng tắm", "phong tam", "tủ chậu", "tu chau", "gương", "guong", "combo"];
+    if (t === "toilet") return ["bếp", "bep", "hút mùi", "hut mui", "quạt", "quat", "sen tắm", "sen tam", "tủ chậu", "tu chau"];
+    if (t === "fan") return ["bếp", "bep", "sen", "lavabo", "bồn cầu", "bon cau", "tủ chậu", "tu chau"];
+    return [];
+}
+
+function itemTextForScope(item = {}) {
+    return normalizeIntentText([item.title, item.name, item.subtitle, item.path, item.webViewLink].filter(Boolean).join(" "));
+}
+
+function filterProductItemsByScope(items = [], productType = "") {
+    const list = Array.isArray(items) ? items : [];
+    const t = String(productType || "").toLowerCase();
+    if (!t || ["combo", "kitchen_bath"].includes(t)) return list;
+
+    const positives = productScopeTerms(t).map(normalizeIntentText).filter(Boolean);
+    const negatives = productNegativeScopeTerms(t).map(normalizeIntentText).filter(Boolean);
+
+    const strict = list.filter(item => {
+        const txt = itemTextForScope(item);
+        if (!txt) return false;
+        if (negatives.some(w => txt.includes(w))) return false;
+        return positives.some(w => txt.includes(w));
+    });
+
+    // Nếu lọc strict ra kết quả thì dùng. Nếu không, chỉ trả về nguyên list khi nguồn là productRow path cụ thể.
+    // Với static fallback, list sai nhóm sẽ bị chặn từ getStaticProductItems.
+    return strict.length ? strict : list;
+}
+
 async function loadProductMediaItems(productType, productRow) {
     let items = [];
     if (productRow?.path) {
@@ -1617,6 +1964,7 @@ async function loadProductMediaItems(productType, productRow) {
         }
     }
     if (!items || !items.length) items = getStaticProductItems(productType);
+    items = filterProductItemsByScope(items || [], productType);
     return items || [];
 }
 
@@ -1863,7 +2211,7 @@ function productFromAdText(text = "") {
     if (["quat", "quat tran", "quat den", "guka", "10 canh", "8 canh", "fan"].some(w => msg.includes(w))) return "fan";
     if (["bon cau", "cau thong minh", "toilet", "wc", "bet", "bon cau thong minh"].some(w => msg.includes(w))) return "toilet";
     if (["tu chau", "tu lavabo", "guong lavabo", "tu chau guong", "vanity"].some(w => msg.includes(w))) return "vanity";
-    if (["bep", "bep tu", "hut mui", "chau rua bat", "kitchen"].some(w => msg.includes(w))) return "kitchen";
+    if (["bep", "do bep", "bep tu", "hut mui", "chau rua bat", "kitchen"].some(w => msg.includes(w))) return "kitchen";
     if (["sen", "voi", "lavabo", "chau rua", "faucet"].some(w => msg.includes(w))) return "faucet";
     if (["thiet bi ve sinh", "tbvs", "combo", "phong tam", "nha tam", "bathroom"].some(w => msg.includes(w))) return "combo";
     return null;
@@ -1952,7 +2300,8 @@ function resolveWorkflowProduct(state, customerMessage = "", historyText = "", e
 }
 
 function normalizeMediaProduct(productType) {
-    if (productType === "toilet") return "combo"; // bồn cầu vẫn thuộc nhóm thiết bị vệ sinh để có slide mở đầu.
+    // 4.0.3: không map toilet -> combo nữa, vì sẽ trộn bồn cầu với sen/lavabo/combo phòng tắm.
+    // Chỉ dùng ảnh đúng nhóm; nếu chưa có ảnh nhóm đó thì không gửi carousel sai.
     return productType || "combo";
 }
 
@@ -2037,10 +2386,117 @@ function buildSafePriceOrPhoneReply(productType, productRow, customerMessage = "
 }
 
 function buildWelcomeText(productType, isOldCustomer) {
-    const prefix = isOldCustomer ? "Dạ em thấy mình từng nhắn với showroom trước đó rồi ạ." : "Dạ bên em gửi anh/chị một số mẫu bán chạy tháng này trước ạ.";
-    if (productType === "fan") return `${prefix}\nNếu anh/chị cần đúng mẫu quạt trong quảng cáo hoặc báo giá chi tiết, mình nhắn em nhé.`;
-    if (productType === "kitchen") return `${prefix}\nNếu anh/chị cần đúng bộ bếp/hút mùi trong quảng cáo hoặc báo giá chi tiết, mình nhắn em nhé.`;
-    return `${prefix}\nNếu anh/chị cần đúng mẫu trong quảng cáo hoặc báo giá chi tiết, mình nhắn em nhé.`;
+    const prefix = isOldCustomer ? "Dạ em thấy mình từng nhắn với showroom trước đó rồi ạ." : "Dạ bên em gửi anh/chị một số mẫu bán chạy đúng nhóm sản phẩm đang quan tâm trước ạ.";
+    if (productType === "fan") return `${prefix}
+📞 Nếu cần đúng mẫu quạt trong quảng cáo, báo giá chi tiết hoặc catalogue đầy đủ, anh/chị để lại SĐT/Zalo để showroom gửi nhanh hơn nhé.`;
+    if (productType === "kitchen") return `${prefix}
+📞 Nếu cần đúng bộ bếp/hút mùi trong quảng cáo, báo giá chi tiết hoặc catalogue đầy đủ, anh/chị để lại SĐT/Zalo để showroom gửi nhanh hơn nhé.`;
+    if (productType === "toilet") return `${prefix}
+📞 Nếu cần đúng mẫu bồn cầu thông minh trong quảng cáo, thông số và báo giá chi tiết, anh/chị để lại SĐT/Zalo để showroom gửi nhanh hơn nhé.`;
+    if (productType === "vanity") return `${prefix}
+📞 Nếu cần đúng mẫu tủ chậu gương/tủ lavabo, kích thước và báo giá chi tiết, anh/chị để lại SĐT/Zalo để showroom gửi nhanh hơn nhé.`;
+    return `${prefix}
+📞 Nếu cần đúng mẫu trong quảng cáo, báo giá chi tiết hoặc catalogue đầy đủ, anh/chị để lại SĐT/Zalo để showroom gửi nhanh hơn nhé.`;
+}
+
+function countRecentCustomerTurnsForWorkflow(history = []) {
+    if (!Array.isArray(history)) return 0;
+    return history.filter(line => String(line || "").startsWith("Khách:")).length;
+}
+
+function getRecentBotReplies(history = [], limit = 8) {
+    return (Array.isArray(history) ? history : [])
+        .filter(line => String(line || "").startsWith("Bot:"))
+        .slice(-limit)
+        .map(line => extractBotTextFromHistoryLine(line))
+        .filter(Boolean);
+}
+
+function similarityScore(a = "", b = "") {
+    const wa = normalizeIntentText(a).split(/\s+/).filter(w => w.length > 1);
+    const wb = normalizeIntentText(b).split(/\s+/).filter(w => w.length > 1);
+    if (!wa.length || !wb.length) return 0;
+    const setA = new Set(wa);
+    const setB = new Set(wb);
+    let common = 0;
+    for (const w of setA) if (setB.has(w)) common++;
+    return common / Math.max(setA.size, setB.size);
+}
+
+function containsPhoneAsk(text = "") {
+    const msg = normalizeIntentText(text);
+    return ["sdt", "so dien thoai", "zalo", "za lo", "hotline"].some(w => msg.includes(w));
+}
+
+function leadScoreForMessage(message = "") {
+    const msg = normalizeIntentText(message);
+    let score = 0;
+    if (["gia", "bao gia", "bao nhieu", "bao nhieu tien"].some(w => msg.includes(w))) score += 3;
+    if (["mua", "lay", "dat", "con hang", "co hang", "ship", "giao", "lap dat"].some(w => msg.includes(w))) score += 2;
+    if (["bao hanh", "dia chi", "showroom", "o dau"].some(w => msg.includes(w))) score += 2;
+    if (["chuc nang", "tinh nang", "thong so", "kich thuoc"].some(w => msg.includes(w))) score += 1;
+    if (isPriceFirstObjection(message)) score += 4;
+    return score;
+}
+
+function shouldAskPhoneInReply404({ message = "", state = {}, history = [], justWelcomed = false } = {}) {
+    if (state.hasContact || hasPhoneOrContact((history || []).join(" "))) return false;
+    if (state.phoneRejected || state.preferMessenger) return false;
+    if (justWelcomed) return false; // lời chào đầu đã có lời mời SĐT/Zalo rồi
+    const turns = countRecentCustomerTurnsForWorkflow(history);
+    const score = leadScoreForMessage(message);
+    if (score >= 5) return true;
+    if (turns >= 3) return true;
+    return false;
+}
+
+function buildDirectReplyByIntent(productType, intent, customerMessage = "", state = {}, history = []) {
+    if (intent === "ask_address") {
+        return "Dạ showroom bên em ở 254 Phố Keo, Gia Lâm, Hà Nội ạ. Anh/chị muốn em gửi định vị hoặc xem mẫu nào trước khi qua showroom không ạ?";
+    }
+    if (intent === "ask_warranty") {
+        if (productType === "fan") return "Dạ quạt bên em có bảo hành theo từng dòng động cơ và phiên bản ạ. Dòng cao cấp sẽ có chính sách bảo hành tốt hơn. Anh/chị gửi em mẫu đang xem hoặc để lại SĐT/Zalo, bên em báo đúng chính sách cho mẫu đó nhé.";
+        if (productType === "toilet") return "Dạ bồn cầu thông minh bảo hành tùy phiên bản và linh kiện điện tử đi kèm ạ. Anh/chị để lại SĐT/Zalo hoặc gửi đúng mẫu đang xem, bên em báo chính xác thời gian bảo hành cho mẫu đó nhé.";
+        return "Dạ chính sách bảo hành tùy nhóm sản phẩm và thương hiệu ạ. Anh/chị gửi đúng mẫu đang xem hoặc để lại SĐT/Zalo, bên em báo rõ bảo hành và lắp đặt cho mình nhé.";
+    }
+    if (intent === "ask_delivery") {
+        return "Dạ bên em có hỗ trợ vận chuyển/lắp đặt tùy khu vực và đơn hàng ạ. Anh/chị cho em xin khu vực nhận hàng hoặc SĐT/Zalo, bên em kiểm tra phí và thời gian giao chính xác nhé.";
+    }
+    if (intent === "general") {
+        if (productType === "fan") return "Dạ anh/chị đang xem mẫu quạt nào ạ? Bên em có dòng tiết kiệm và dòng động cơ cao cấp, em có thể gửi đúng nhóm mẫu hoặc báo khoảng giá cho mình.";
+        if (productType === "kitchen") return "Dạ nhóm đồ bếp bên em có bếp từ, hút mùi, chậu rửa bát và vòi bếp. Anh/chị muốn xem nhóm nào trước để em gửi đúng mẫu, không gửi lẫn sang phòng tắm ạ?";
+        if (productType === "toilet") return buildFeatureReply("toilet");
+        if (productType === "vanity") return "Dạ tủ chậu gương/tủ lavabo bên em có nhiều kích thước và kiểu dáng. Anh/chị muốn xem mẫu treo tường gọn hay mẫu đồng bộ gương - chậu - tủ đẹp hơn chút ạ?";
+    }
+    return null;
+}
+
+function guardReplyBeforeSend(reply = "", { productType = "", message = "", state = {}, history = [], allowPhoneAsk = false } = {}) {
+    let text = String(reply || "").trim();
+    const norm = normalizeIntentText(text);
+
+    // Chặn câu máy móc từng gây lỗi.
+    if (!text || norm.includes("can kiem tra lai dung mau") || norm.includes("tranh bao sai")) {
+        text = buildSafePriceOrPhoneReply(productType || state.currentTopic || state.productType || "combo", null, message);
+    }
+
+    // Không để slide/nhóm trả lời lẫn sản phẩm rõ ràng.
+    if (productType === "kitchen" && ["sen", "lavabo", "bon cau", "phong tam", "nha tam"].some(w => norm.includes(w))) {
+        text = "Dạ em hiểu mình đang hỏi đồ bếp ạ. Bên em sẽ chỉ gửi nhóm bếp từ, hút mùi, chậu rửa bát và vòi bếp, không gửi lẫn sen vòi/lavabo phòng tắm. Anh/chị muốn xem bếp từ - hút mùi hay chậu vòi bếp trước ạ?";
+    }
+
+    const recent = getRecentBotReplies(history, 6);
+    if (recent.some(r => similarityScore(r, text) >= 0.82)) {
+        const alt = buildDirectReplyByIntent(productType, detectCustomerIntent(message), message, state, history);
+        text = alt && !recent.some(r => similarityScore(r, alt) >= 0.82) ? alt : buildPhoneAskByTopic(productType);
+    }
+
+    if (!allowPhoneAsk && containsPhoneAsk(text)) {
+        const direct = buildDirectReplyByIntent(productType, detectCustomerIntent(message), message, state, history);
+        if (direct) text = direct;
+    }
+
+    return text.slice(0, 950);
 }
 
 function buildOutsideOfficeContactReply() {
@@ -2078,21 +2534,32 @@ async function processAiguka4Workflow(senderId, event = {}) {
     }
 
     const productType = resolveWorkflowProduct(state, customerMessage, historyText, event) || "combo";
+    const currentIntent = detectCustomerIntent(customerMessage);
+    state.lastIntent = currentIntent;
+    updateSupabaseConversationMetadata(senderId, {
+        product_group: toDbProductGroup(productType),
+        current_intent: currentIntent,
+        page_id: state.lastPageId || null,
+        last_message_at: new Date().toISOString()
+    }).catch(err => console.error("Workflow conversation update error:", err.message));
+    updateSupabaseCustomerState(senderId, state, { last_intent: currentIntent }).catch(err => console.error("Workflow state update error:", err.message));
     const adKey = getAdSessionKey(event, productType);
     const productRow = await findProductRowSafe(productType, customerMessage, historyText);
     const oldCustomer = isMeaningfulOldConversation(history.slice(0, -1));
 
     // 1) Slide mở đầu: luôn là carousel, gửi trước tin nhắn đầu tiên của bot trong phiên quảng cáo.
+    let justWelcomed = false;
     if (isFirstBotReplyInThisAd(state, adKey)) {
         const showcase = await sendWelcomeProductShowcase(senderId, productType, productRow, state, adKey);
         aiTrace(senderId, "A4-WELCOME-SHOWCASE", { productType, adKey, ...showcase });
         const welcome = buildWelcomeText(productType, oldCustomer);
         await sendMessage(senderId, welcome);
         conversations[senderId].push(`Bot: ${welcome} | TIME:${Date.now()} | PRODUCT:${productType} | A4_WELCOME`);
+        justWelcomed = true;
     }
 
     // 2) Khách xin xem thêm: gửi slide kế tiếp, không trùng; lần thứ 3 thì ép sang SĐT/Zalo.
-    if (isAskMoreImagesMessage(customerMessage) || shouldSendCarousel(customerMessage)) {
+    if (isAskMoreImagesMessage(customerMessage) || shouldSendCarousel(customerMessage) || isProductBrowseRequest(customerMessage)) {
         const mediaResult = await sendCarouselByProduct(senderId, normalizeMediaProduct(productType), productRow, state, customerMessage);
         aiTrace(senderId, "A4-MORE-SLIDE", mediaResult || {});
         if (mediaResult && mediaResult.sent && mediaResult.needClose) {
@@ -2100,9 +2567,9 @@ async function processAiguka4Workflow(senderId, event = {}) {
             await sendMessage(senderId, close);
             conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType} | A4_MORE_CLOSE`);
         } else if (!mediaResult || !mediaResult.sent) {
-            const close = buildAfterSlide2Close();
+            const close = "Dạ hiện em chưa có đủ ảnh đúng nhóm sản phẩm này để gửi tự động, em không gửi lẫn sang nhóm khác để tránh sai mẫu. Anh/chị để lại SĐT/Zalo, bên em gửi đúng album và báo giá chi tiết cho mình nhé.";
             await sendMessage(senderId, close);
-            conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType} | A4_MORE_NO_IMAGE`);
+            conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType} | A4_MORE_NO_SCOPED_IMAGE`);
         }
         saveConversations(conversations);
         saveCustomerStates(customerStates);
@@ -2111,7 +2578,8 @@ async function processAiguka4Workflow(senderId, event = {}) {
 
     // 3) Hỏi giá / phản đối "báo giá rồi gửi số": báo khoảng giá an toàn, không quay lại câu máy móc.
     if (isPriceRequest(customerMessage) || isPriceFirstObjection(customerMessage)) {
-        const reply = buildSafePriceOrPhoneReply(productType, productRow, customerMessage);
+        let reply = buildSafePriceOrPhoneReply(productType, productRow, customerMessage);
+        reply = guardReplyBeforeSend(reply, { productType, message: customerMessage, state, history, allowPhoneAsk: true });
         await sendMessage(senderId, reply);
         conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${productType} | A4_PRICE`);
         state.stage = "GET_PHONE";
@@ -2123,8 +2591,19 @@ async function processAiguka4Workflow(senderId, event = {}) {
     }
 
     // 4) Các câu hỏi đơn giản xử lý bằng rule, hạn chế gọi GPT.
+    if (currentIntent === "ask_features") {
+        let reply = buildFeatureReply(productType);
+        reply = guardReplyBeforeSend(reply, { productType, message: customerMessage, state, history, allowPhoneAsk: shouldAskPhoneInReply404({ message: customerMessage, state, history, justWelcomed }) });
+        await sendMessage(senderId, reply);
+        conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${productType} | A4_FEATURES`);
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        return;
+    }
+
     if (isBrandQuestion(customerMessage)) {
-        const reply = buildBrandReply(productType);
+        let reply = buildBrandReply(productType);
+        reply = guardReplyBeforeSend(reply, { productType, message: customerMessage, state, history, allowPhoneAsk: shouldAskPhoneInReply404({ message: customerMessage, state, history, justWelcomed }) });
         await sendMessage(senderId, reply);
         conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${productType} | A4_BRAND`);
         saveConversations(conversations);
@@ -2135,7 +2614,8 @@ async function processAiguka4Workflow(senderId, event = {}) {
     if (isDontCallMessage(customerMessage)) {
         state.preferMessenger = true;
         state.phoneRejected = true;
-        const reply = buildDontCallReply(productType);
+        let reply = buildDontCallReply(productType);
+        reply = guardReplyBeforeSend(reply, { productType, message: customerMessage, state, history, allowPhoneAsk: false });
         await sendMessage(senderId, reply);
         conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${productType} | A4_DONT_CALL`);
         saveConversations(conversations);
@@ -2143,9 +2623,20 @@ async function processAiguka4Workflow(senderId, event = {}) {
         return;
     }
 
-    const fallback = buildPhoneAskByTopic(productType);
+    const allowPhoneAsk = shouldAskPhoneInReply404({ message: customerMessage, state, history, justWelcomed });
+    let fallback = buildDirectReplyByIntent(productType, currentIntent, customerMessage, state, history) || buildPhoneAskByTopic(productType);
+    if (allowPhoneAsk && !containsPhoneAsk(fallback)) {
+        fallback = `${fallback}
+
+${buildPhoneAskByTopic(productType)}`;
+    }
+    fallback = guardReplyBeforeSend(fallback, { productType, message: customerMessage, state, history, allowPhoneAsk });
+    if (containsPhoneAsk(fallback)) {
+        state.askedPhone = true;
+        state.lastPhoneAskTime = Date.now();
+    }
     await sendMessage(senderId, fallback);
-    conversations[senderId].push(`Bot: ${fallback} | TIME:${Date.now()} | PRODUCT:${productType} | A4_FALLBACK`);
+    conversations[senderId].push(`Bot: ${fallback} | TIME:${Date.now()} | PRODUCT:${productType} | A4_REPLY_GUARD`);
     saveConversations(conversations);
     saveCustomerStates(customerStates);
 }
@@ -2155,8 +2646,18 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
     const historyBefore = conversations[senderId] || [];
     const historyTextBefore = historyBefore.slice(-40).join(" ");
 
+    state.lastPageId = event?.recipient?.id || state.lastPageId || "";
     const productType = resolveWorkflowProduct(state, customerMessage, historyTextBefore, event);
+    const currentIntent = detectCustomerIntent(customerMessage);
+    state.lastIntent = currentIntent;
     if (productType) lockProductForConversation(state, productType, detectProductFromReferral(event) ? "ad_referral" : "message_or_history");
+    updateSupabaseConversationMetadata(senderId, {
+        page_id: state.lastPageId || null,
+        product_group: toDbProductGroup(productType || state.currentTopic || state.productType || ""),
+        current_intent: currentIntent,
+        last_message_at: new Date(now).toISOString()
+    }).catch(err => console.error("Conversation metadata update error:", err.message));
+    updateSupabaseCustomerState(senderId, state, { last_intent: currentIntent }).catch(err => console.error("Customer state update error:", err.message));
 
     if (isDontCallMessage(customerMessage)) {
         state.preferMessenger = true;
@@ -2171,6 +2672,7 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
         state.hasContact = true;
         state.stage = "HUMAN_HANDOVER";
         clearCustomerReplyTimer(senderId);
+        markPendingRepliesForSender(senderId, "cancelled", "customer_has_contact").catch(err => console.error("Cancel pending contact error:", err.message));
         saveConversations(conversations);
         saveCustomerStates(customerStates);
 
@@ -2198,6 +2700,15 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
     state.pendingBotReplyDueAt = dueAt;
     saveCustomerStates(customerStates);
 
+    scheduleDurablePendingReply({
+        senderId,
+        pageId: event?.recipient?.id || "",
+        dueAtMs: dueAt,
+        reason: isOfficeHoursVN(now) ? "office_delay_10m" : "outside_delay_5m"
+    }).then(result => {
+        if (result?.ok) console.log("Durable pending reply", result.action, senderId, result.due_at);
+    }).catch(err => console.error("Durable pending schedule promise error:", err.message));
+
     const timer = setTimeout(async () => {
         customerReplyTimers.delete(senderId);
         try {
@@ -2205,6 +2716,7 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
             if (latestState.hasContact) return;
             if (latestState.humanTakeoverUntil && Date.now() < Number(latestState.humanTakeoverUntil)) return;
             await processAiguka4Workflow(senderId, event);
+            markPendingRepliesForSender(senderId, "sent", "sent_by_memory_timer").catch(err => console.error("Mark pending sent error:", err.message));
         } catch (error) {
             console.error("AIGUKA4 scheduled workflow error:", senderId, error);
         }
@@ -2482,6 +2994,8 @@ function startHumanTakeover(senderId, adminText, now) {
     state.lastAdminTime = now;
 
     clearHumanTakeoverTimer(senderId);
+    clearCustomerReplyTimer(senderId);
+    markPendingRepliesForSender(senderId, "admin_taken", "admin_echo_detected").catch(err => console.error("Admin pending cancel error:", err.message));
 
     conversations[senderId].push(`Admin: ${adminText || "[admin attachment/action]"} | TIME:${now} | PRODUCT:${state.currentTopic || "unknown"}`);
     conversations[senderId] = conversations[senderId].slice(-80);
@@ -5035,6 +5549,16 @@ function startBackgroundJobs() {
     setTimeout(() => {
         checkFollowUpsOnStart().catch(console.error);
     }, 5000);
+
+    // Durable Pending Reply Queue: khi Render ngủ/restart, timer RAM mất.
+    // Worker này quét Supabase.pending_replies để trả lời các lịch đã quá hạn.
+    setTimeout(() => {
+        processDuePendingReplies(50).catch(console.error);
+    }, 8000);
+
+    setInterval(() => {
+        processDuePendingReplies(20).catch(console.error);
+    }, 60 * 1000);
 
     // Khi server còn online, kiểm tra lại mỗi 2 giờ để giảm tần suất tự động.
     setInterval(() => {
