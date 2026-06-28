@@ -19,6 +19,11 @@ const SUPABASE_ENABLED = String(process.env.SUPABASE_ENABLED || "false").toLower
 const SUPABASE_URL = String(process.env.SUPABASE_URL || "").replace(/\/+$/, "");
 const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY || "";
 
+// Public URL used for optional image proxy in Messenger carousel.
+// Set AIGUKA_PUBLIC_URL=https://your-service.onrender.com on Render for best Pancake/Meta Suite compatibility.
+const AIGUKA_PUBLIC_URL = String(process.env.AIGUKA_PUBLIC_URL || process.env.PUBLIC_BASE_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/+$/, "");
+const AIGUKA_IMAGE_PROXY_ENABLED = String(process.env.AIGUKA_IMAGE_PROXY_ENABLED || "true").toLowerCase() !== "false";
+
 
 const HISTORY_FILE = path.join(__dirname, '..', 'conversations.json');
 const STATE_FILE = path.join(__dirname, '..', 'customer_states.json');
@@ -845,9 +850,35 @@ app.get('/healthz', (req, res) => {
     res.status(200).json({
         ok: true,
         service: 'AIGUKA',
-        version: '4.0.4-Reply-Engine-Guard',
+        version: '4.0.4-Reply-Engine-Guard-Carousel-Fix',
         time: new Date().toISOString()
     });
+});
+
+
+app.get('/image-proxy', async (req, res) => {
+    const url = String(req.query.u || "");
+    if (!/^https:\/\//i.test(url)) return res.status(400).send("Bad image url");
+    try {
+        const response = await fetch(url, {
+            headers: {
+                "User-Agent": "Mozilla/5.0 AIGUKA Image Proxy",
+                "Accept": "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+            }
+        });
+        if (!response.ok) throw new Error(`source ${response.status}`);
+        const type = response.headers.get("content-type") || "image/jpeg";
+        const buf = Buffer.from(await response.arrayBuffer());
+        res.setHeader("Content-Type", type.startsWith("image/") ? type : "image/jpeg");
+        res.setHeader("Cache-Control", "public, max-age=86400");
+        return res.send(buf);
+    } catch (error) {
+        // 1x1 transparent gif fallback: prevents broken requests from crashing the bot.
+        const fallback = Buffer.from("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==", "base64");
+        res.setHeader("Content-Type", "image/gif");
+        res.setHeader("Cache-Control", "public, max-age=300");
+        return res.send(fallback);
+    }
 });
 
 app.get('/supabase-health', async (req, res) => {
@@ -883,7 +914,7 @@ app.get('/reply-engine-health', (req, res) => {
         { text: 'xem đồ bếp', product: detectExplicitTopic('xem đồ bếp'), intent: detectCustomerIntent('xem đồ bếp'), score: leadScoreForMessage('xem đồ bếp') },
         { text: 'bồn cầu màu cam chức năng thế nào', product: detectExplicitTopic('bồn cầu màu cam chức năng thế nào'), intent: detectCustomerIntent('bồn cầu màu cam chức năng thế nào'), score: leadScoreForMessage('bồn cầu màu cam chức năng thế nào') }
     ];
-    res.json({ ok: true, version: '4.0.4-Reply-Engine-Guard', samples });
+    res.json({ ok: true, version: '4.0.4-Reply-Engine-Guard-Carousel-Fix', samples });
 });
 
 app.get('/product-sheet-debug', async (req, res) => {
@@ -1329,7 +1360,81 @@ async function sendMessage(senderId, text) {
     }).catch(err => console.error("Supabase bot text log error:", err.message));
 }
 
+
+function inferCarouselProductCode(element = {}, logName = "") {
+    const txt = normalizeIntentText([element.title, element.subtitle, logName].filter(Boolean).join(" "));
+    if (["bep", "hut mui", "yamato", "kitchen", "chau rua bat", "voi bep"].some(w => txt.includes(w))) return "BEP";
+    if (["quat", "fan", "canh"].some(w => txt.includes(w))) return "QUAT";
+    if (["bon cau", "toilet", "bet", "thong minh", "wc"].some(w => txt.includes(w))) return "BC";
+    if (["tu chau", "tu lavabo", "guong", "vanity"].some(w => txt.includes(w))) return "TC";
+    if (["sen", "voi", "lavabo", "faucet"].some(w => txt.includes(w))) return "SEN";
+    if (["combo", "phong tam", "thiet bi ve sinh", "bathroom"].some(w => txt.includes(w))) return "TBVS";
+    return "SP";
+}
+
+function safeSku(code, idx) {
+    return `${String(code || "SP").replace(/[^A-Z0-9]/gi, "").toUpperCase()}-${String(idx + 1).padStart(2, "0")}`;
+}
+
+function isPublicHttpUrl(url = "") {
+    return /^https:\/\//i.test(String(url || ""));
+}
+
+function proxiedImageUrl(imageUrl = "") {
+    const raw = String(imageUrl || "").trim();
+    if (!isPublicHttpUrl(raw)) return raw;
+    if (!AIGUKA_PUBLIC_URL || !AIGUKA_IMAGE_PROXY_ENABLED) return raw;
+    // Facebook CDN links often render in Messenger but fail in Pancake/Meta Business Suite.
+    // Proxy keeps a stable public URL and falls back gracefully if the source expires.
+    if (/scontent\.|fbcdn\.|facebook\./i.test(raw)) {
+        return `${AIGUKA_PUBLIC_URL}/image-proxy?u=${encodeURIComponent(raw)}`;
+    }
+    return raw;
+}
+
+function enhanceCarouselElementsForAdmin(elements = [], logName = "") {
+    return (Array.isArray(elements) ? elements : []).slice(0, 10).map((element, idx) => {
+        const code = inferCarouselProductCode(element, logName);
+        const sku = element.sku || element.product_id || safeSku(code, idx);
+        let title = String(element.title || element.name || "").trim();
+        if (!title || /^example$/i.test(title)) title = "Mẫu sản phẩm";
+        if (!title.includes(sku)) title = `${sku} | ${title}`;
+        title = title.slice(0, 80);
+
+        const oldSubtitle = String(element.subtitle || "").replace(/^example$/i, "").trim();
+        const subtitle = (`Mã ${sku} | Hotline 0973693677` + (oldSubtitle ? ` | ${oldSubtitle}` : "")).slice(0, 80);
+        const imageUrl = proxiedImageUrl(element.image_url || "");
+        const buttons = Array.isArray(element.buttons) ? [...element.buttons] : [];
+        if (!buttons.some(b => b && b.type === "postback" && String(b.payload || "").includes(sku)) && buttons.length < 3) {
+            buttons.unshift({ type: "postback", title: `Chọn ${sku}`.slice(0, 20), payload: `SELECT_PRODUCT_${sku}` });
+        }
+        if (!buttons.some(b => b && b.type === "phone_number") && buttons.length < 3) {
+            buttons.push({ type: "phone_number", title: "Gọi hotline", payload: "0973693677" });
+        }
+
+        const enhanced = {
+            ...element,
+            sku,
+            title,
+            subtitle,
+            image_url: imageUrl,
+            buttons
+        };
+        if (isPublicHttpUrl(imageUrl)) {
+            enhanced.default_action = {
+                type: "web_url",
+                url: imageUrl,
+                webview_height_ratio: "full",
+                messenger_extensions: false
+            };
+        }
+        return enhanced;
+    }).filter(x => x.image_url && isPublicHttpUrl(x.image_url));
+}
+
 async function sendTemplate(senderId, elements, logName) {
+    const safeElements = enhanceCarouselElementsForAdmin(elements, logName);
+    if (!safeElements.length) throw new Error(`${logName || 'Template'} has no valid public image elements`);
     const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
 
     const response = await fetch(url, {
@@ -1342,7 +1447,8 @@ async function sendTemplate(senderId, elements, logName) {
                     type: "template",
                     payload: {
                         template_type: "generic",
-                        elements
+                        image_aspect_ratio: "square",
+                        elements: safeElements
                     }
                 }
             }
@@ -1366,7 +1472,7 @@ async function sendTemplate(senderId, elements, logName) {
         messageType: "template",
         productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
         intent: "bot_template",
-        raw: { elements, facebook_status: response.status, facebook_result: result }
+        raw: { elements: safeElements, original_elements: elements, facebook_status: response.status, facebook_result: result }
     }).catch(err => console.error("Supabase bot template log error:", err.message));
 }
 
