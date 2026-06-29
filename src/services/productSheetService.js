@@ -329,7 +329,7 @@ function buildPriceRangeReply(row, productType = "") {
         return `Dạ ${label} bên em có nhiều mẫu và phân khúc khác nhau. Anh/chị để lại SĐT/Zalo, bên em gửi mẫu phù hợp và báo khoảng giá chính xác hơn cho mình nhé?`;
     }
 
-    return `Dạ ${label} bên em hiện có nhiều phiên bản, giá ${rangeText} tùy mẫu và phân khúc ạ. Em chưa báo giá chi tiết từng mẫu trên Messenger để tránh sai chương trình. Anh/chị để lại SĐT/Zalo, sale bên em gửi đúng mẫu phù hợp và báo chi tiết cho mình nhé?`;
+    return `Dạ ${label} bên em hiện có nhiều phiên bản, giá ${rangeText} tùy mẫu và phân khúc ạ. Anh/chị để lại SĐT/Zalo, sale bên em gửi đúng mẫu phù hợp và báo giá chi tiết cho mình nhé?`;
 }
 
 function buildProductIntroWithPrice(row, productType = "") {

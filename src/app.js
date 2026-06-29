@@ -1325,27 +1325,7 @@ function buildCarouselIntro(productType) {
 }
 
 function buildCarouselClose(productType) {
-    if (productType === "fan") {
-        return "Đây là một số mẫu quạt phổ biến bên em ạ. Nếu anh cần nhiều mẫu hơn, màu khác, bản động cơ Nhật/Ý hoặc báo giá chi tiết, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn kỹ hơn nhé?";
-    }
-
-    if (productType === "vanity") {
-        return "Đây là một số mẫu tủ chậu gương/tủ lavabo tiêu biểu bên em ạ. Nếu anh/chị cần nhiều mẫu hơn, kích thước khác hoặc báo giá theo phòng tắm, anh/chị để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn kỹ hơn nhé?";
-    }
-
-    if (productType === "faucet") {
-        return "Đây là một số mẫu sen vòi, lavabo, chậu rửa phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác hoặc báo giá chi tiết theo bộ, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
-    }
-
-    if (productType === "combo") {
-        return "Đây là một số combo thiết bị vệ sinh/phòng tắm phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác, phối theo ngân sách hoặc báo giá chi tiết, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
-    }
-
-    if (productType === "kitchen" || productType === "kitchen_bath") {
-        return "Đây là một số mẫu phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác hoặc báo giá chi tiết theo bộ, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
-    }
-
-    return "Đây là một số mẫu phổ biến bên em ạ. Nếu anh cần nhiều mẫu khác hoặc báo giá chi tiết, anh để lại SĐT/Zalo để bên em gửi catalogue đầy đủ và tư vấn thêm nhé?";
+    return buildPostSlideReply(productType, isOfficeHoursVN());
 }
 
 function getCustomerMessageFromEvent(event) {
@@ -2111,7 +2091,7 @@ function detectWrongProductComplaint(message = "") {
 
 function buildWrongProductRecoveryReply(productType = "") {
     const label = productLabel(productType);
-    return `Dạ em xin lỗi anh/chị ạ, do bên em đang có nhiều tin nhắn từ các mẫu quảng cáo khác nhau nên hệ thống bị nhận nhầm sản phẩm. Mình đang hỏi về ${label} đúng không ạ? Anh/chị để lại SĐT/Zalo giúp em, bên em chuyển đúng mẫu ${label} và báo giá chi tiết qua Zalo để tránh nhầm tiếp ạ.`;
+    return `Dạ em xin lỗi anh/chị ạ, do bên em đang có nhiều tin nhắn từ các mẫu quảng cáo khác nhau nên hệ thống bị nhận nhầm sản phẩm. Mình đang hỏi về ${label} đúng không ạ? Anh/chị để lại SĐT/Zalo giúp em, bên em chuyển đúng mẫu ${label} và báo giá chi tiết qua Zalo để gửi đúng mẫu ạ.`;
 }
 
 function productLabel(productType = "") {
@@ -2283,8 +2263,37 @@ async function loadProductMediaItems(productType, productRow) {
     return items || [];
 }
 
-function buildAfterSlide2Close() {
-    return "Đây là một số sản phẩm tiêu biểu bên em đang có. Thực tế showroom còn nhiều mẫu khác với nhiều phong cách và mức giá khác nhau. Anh/chị cho em xin SĐT hoặc Zalo, bên em gửi thêm đúng mẫu phù hợp với nhu cầu nhé. Gửi qua Zalo cũng tiện hơn vì Messenger dễ trôi tin và gửi nhiều ảnh sẽ khá nặng ạ.";
+function buildAfterSlide2Close(productType = "", inOffice = isOfficeHoursVN()) {
+    return buildPostSlideReply(productType, inOffice);
+}
+
+function buildPostSlideReply(productType = "", inOffice = isOfficeHoursVN()) {
+    const label = productLabel(productType);
+
+    if (!inOffice) {
+        return `Dạ em gửi anh/chị một số mẫu ${label} bán chạy để mình tham khảo trước ạ. Nếu cần báo giá chi tiết hoặc xem thêm nhiều mẫu phù hợp, anh/chị để lại SĐT/Zalo, showroom sẽ liên hệ tư vấn sớm nhất khi vào giờ làm việc nhé.`;
+    }
+
+    if (productType === "fan") {
+        return "Dạ bên em có nhiều mẫu quạt trần với kiểu dáng, màu sắc, kích thước và động cơ khác nhau. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp với không gian nhà mình và báo giá chi tiết nhé.";
+    }
+    if (productType === "toilet") {
+        return "Dạ bên em có nhiều mẫu bồn cầu thông minh với các tính năng và mức giá khác nhau. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp và báo giá chi tiết cho mình nhé.";
+    }
+    if (productType === "vanity") {
+        return "Dạ tủ chậu/lavabo bên em có nhiều kích thước, màu sắc và chất liệu khác nhau. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp với không gian phòng tắm và báo giá chi tiết nhé.";
+    }
+    if (productType === "faucet") {
+        return "Dạ bên em có nhiều mẫu sen vòi, lavabo và chậu vòi từ phổ thông đến cao cấp. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp và báo giá chi tiết nhé.";
+    }
+    if (productType === "kitchen") {
+        return "Dạ đồ bếp bên em có nhiều mẫu bếp từ, hút mùi, chậu rửa và vòi bếp theo từng phân khúc. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp với nhu cầu và báo giá chi tiết nhé.";
+    }
+    if (productType === "combo" || productType === "kitchen_bath") {
+        return "Dạ bên em có nhiều mẫu combo phòng tắm ở nhiều mức giá khác nhau, từ phổ thông đến cao cấp ạ. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp với nhu cầu và báo giá chi tiết cho mình nhé.";
+    }
+
+    return `Dạ bên em có nhiều mẫu ${label} ở nhiều phân khúc khác nhau. Anh/chị để lại SĐT/Zalo, sale bên em sẽ gửi đúng mẫu phù hợp và báo giá chi tiết cho mình nhé.`;
 }
 
 async function sendProductMediaByRule(senderId, productType, productRow, state, customerMessage = "") {
@@ -2311,7 +2320,7 @@ async function sendProductMediaByRule(senderId, productType, productRow, state, 
     // 1-4 ảnh: gửi toàn bộ ảnh lẻ một lần. Nếu khách hỏi tiếp sau khi đã xem hết thì không gửi lặp.
     if (items.length <= 4) {
         if (memory.stage >= 2 && wantsMore) {
-            await sendMessage(senderId, buildAfterSlide2Close());
+            await sendMessage(senderId, buildAfterSlide2Close(productType, isOfficeHoursVN()));
             return { sent: true, mode: "closed", sentCount: 0, total: items.length, final: true, needClose: false };
         }
         for (const item of items) await sendImageMessage(senderId, item.image_url, `Image ${productType} - ${item.title || item.name || "photo"}`);
@@ -2324,7 +2333,7 @@ async function sendProductMediaByRule(senderId, productType, productRow, state, 
     if (wantsMore && memory.stage >= 1) {
         const moreAskCount = Number(memory.moreAskCount || 0) + 1;
         if (moreAskCount >= 3) {
-            await sendMessage(senderId, buildAfterSlide2Close());
+            await sendMessage(senderId, buildAfterSlide2Close(productType, isOfficeHoursVN()));
             state.photoMemory[key] = { ...memory, stage: 3, moreAskCount, sentCount: Number(memory.sentCount || 0), total: items.length, updatedAt: Date.now() };
             return { sent: true, mode: "closed_after_third_more", sentCount: 0, total: items.length, final: true, needClose: false };
         }
@@ -2332,7 +2341,7 @@ async function sendProductMediaByRule(senderId, productType, productRow, state, 
         const start = Number(memory.sentCount || 10);
         const chunk = items.slice(start, start + 10);
         if (!chunk.length) {
-            await sendMessage(senderId, buildAfterSlide2Close());
+            await sendMessage(senderId, buildAfterSlide2Close(productType, isOfficeHoursVN()));
             state.photoMemory[key] = { ...memory, stage: 3, moreAskCount, sentCount: start, total: items.length, updatedAt: Date.now() };
             return { sent: true, mode: "closed_no_more_images", sentCount: 0, total: items.length, final: true };
         }
@@ -3248,7 +3257,7 @@ function buildSafePriceOrPhoneReply(productType, productRow, customerMessage = "
         return "Dạ mẫu quạt bên em có nhiều phiên bản, giá khoảng 4,39 triệu đến 8,45 triệu tùy động cơ và phân khúc ạ. Nếu anh thấy tầm giá phù hợp, anh để lại SĐT/Zalo để bên em gửi đúng mẫu trong quảng cáo và báo chi tiết nhé.";
     }
     if (productType === "kitchen") {
-        return "Dạ nhóm bếp từ - hút mùi bên em có nhiều phân khúc, thường từ khoảng 5 triệu đến hơn 20 triệu tùy bộ ạ. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu và báo chi tiết theo chương trình hiện tại nhé.";
+        return "Dạ nhóm bếp từ - hút mùi bên em có nhiều phân khúc, thường từ khoảng 5 triệu đến hơn 20 triệu tùy bộ ạ. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu phù hợp và báo chi tiết nhé.";
     }
     if (productType === "toilet") {
         return "Dạ bồn cầu thông minh bên em có nhiều phiên bản từ cơ bản đến cao cấp. Giá phụ thuộc tính năng như tự rửa, sấy, tự xả, UV và điều khiển. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu trong quảng cáo và báo chi tiết nhé.";
@@ -3256,14 +3265,16 @@ function buildSafePriceOrPhoneReply(productType, productRow, customerMessage = "
     if (productType === "vanity") {
         return "Dạ tủ chậu gương/tủ lavabo bên em có nhiều kích thước và chất liệu, giá thay đổi theo bộ. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu, kích thước và báo chi tiết cho mình nhé.";
     }
-    return "Dạ nhóm sản phẩm này có nhiều mẫu và phân khúc khác nhau. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu trong quảng cáo và báo giá chi tiết theo chương trình hiện tại nhé.";
+    return "Dạ nhóm sản phẩm này có nhiều mẫu và phân khúc khác nhau. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu phù hợp và báo giá chi tiết nhé.";
 }
 
-function buildWelcomeText(productType, isOldCustomer) {
-    const label = productLabel(productType);
-    const prefix = isOldCustomer ? "Dạ em thấy mình từng nhắn với showroom trước đó rồi ạ." : `Dạ em gửi anh/chị các mẫu ${label} bán chạy tháng qua để mình xem trước ạ.`;
-    return `${prefix}
-Thông tin chi tiết các sản phẩm khác, catalogue đầy đủ hoặc báo giá đúng mẫu, anh/chị để lại SĐT/Zalo để showroom gửi nhanh hơn nhé.`;
+function buildWelcomeText(productType, isOldCustomer, inOffice = isOfficeHoursVN()) {
+    if (isOldCustomer) {
+        const label = productLabel(productType);
+        return `Dạ em thấy mình từng nhắn với showroom trước đó rồi ạ. Em gửi lại một số mẫu ${label} bán chạy để mình xem trước nhé.
+${buildPostSlideReply(productType, inOffice)}`;
+    }
+    return buildPostSlideReply(productType, inOffice);
 }
 
 function countRecentCustomerTurnsForWorkflow(history = []) {
@@ -3545,7 +3556,7 @@ async function processAiguka4Workflow(senderId, event = {}) {
         const mediaResult = await sendCarouselByProduct(senderId, normalizeMediaProduct(productType), productRow, state, customerMessage);
         aiTrace(senderId, "A4-MORE-SLIDE", mediaResult || {});
         if (mediaResult && mediaResult.sent && mediaResult.needClose) {
-            const close = buildAfterSlide2Close();
+            const close = buildAfterSlide2Close(productType, isOfficeHoursVN());
             await sendMessage(senderId, close);
             conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType} | A4_MORE_CLOSE`);
         } else if (!mediaResult || !mediaResult.sent) {
@@ -4030,7 +4041,7 @@ async function handleProductMediaRequest(senderId, customerMessage, currentHisto
     aiTrace(senderId, "04-PHOTO-INTENT", { productType, message: customerMessage });
 
     if (!productType) {
-        const ask = "Dạ anh muốn xem mẫu nhóm nào ạ: quạt, bồn cầu, tủ chậu gương, lavabo, sen vòi, combo phòng tắm hay thiết bị bếp?";
+        const ask = "Dạ anh/chị nhắn giúp em tên sản phẩm mình đang quan tâm, em gửi đúng mẫu bán chạy cho mình nhé.";
         await sendMessage(senderId, ask);
         conversations[senderId].push(`Bot: ${ask} | TIME:${Date.now()} | PRODUCT:unknown | PHOTO_NEED_TOPIC`);
         saveConversations(conversations);
@@ -4046,10 +4057,8 @@ async function handleProductMediaRequest(senderId, customerMessage, currentHisto
         const productRow = await findBestProductRow(productType, customerMessage, currentHistoryText);
         aiTrace(senderId, "05-PRODUCT-ROW", { productType, group: productRow?.group || "", path: productRow?.path || "", price_min: productRow?.price_min || "", price_max: productRow?.price_max || "" });
 
-        const intro = productRow ? buildProductIntroWithPrice(productRow, productType) : buildCarouselIntro(productType);
-        await sendMessage(senderId, intro);
-        conversations[senderId].push(`Bot: ${intro} | TIME:${Date.now()} | PRODUCT:${productType} | SHEET_INTRO`);
-
+        // AIGUKA 4.2.7: không gửi tin giới thiệu trước carousel để tránh 2 tin liên tiếp.
+        // Sau khi gửi slide, bot chỉ gửi 1 tin duy nhất theo trong/ngoài giờ làm việc.
         const mediaResult = await sendCarouselByProduct(senderId, productType, productRow, state, customerMessage);
         aiTrace(senderId, "06-PHOTO-RULE", mediaResult || {});
 
@@ -4062,7 +4071,7 @@ async function handleProductMediaRequest(senderId, customerMessage, currentHisto
             state.carouselSent.push({ topic: productType, time: Date.now(), mode: mediaResult.mode || "unknown" });
             state.carouselSent = state.carouselSent.slice(-20);
 
-            const close = mediaResult.needClose ? buildAfterSlide2Close() : buildCarouselClose(productType);
+            const close = buildPostSlideReply(productType, isOfficeHoursVN());
             await sendMessage(senderId, close);
             conversations[senderId].push(`Bot: ${close} | TIME:${Date.now()} | PRODUCT:${productType} | PHOTO_RULE:${mediaResult.mode || "unknown"}`);
         } else {

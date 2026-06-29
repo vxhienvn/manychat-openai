@@ -245,3 +245,11 @@
 - Dashboard: thêm cột Quảng cáo cho các bảng khách nóng, khách đã có số, khách chưa có số gần nhất.
 - Trong cột Quảng cáo hiển thị tên QC in đậm, tài khoản QC/ID QC in mờ bên dưới.
 - Bổ sung đọc ad_name/ad_account từ dữ liệu Meta webhook/Pancake nếu có, fallback theo ad_id từ Meta Ads.
+
+## 4.2.7 - Post Slide Reply Rules Hotfix
+- Sửa luồng gửi slide: mỗi lần chỉ gửi carousel + 1 tin nhắn, không gửi 2 tin liên tiếp.
+- Trong giờ làm việc: tin sau slide tùy biến theo đúng nhóm sản phẩm khách đang hỏi.
+- Ngoài giờ làm việc: tin sau slide chuyển sang mẫu ngoài giờ, hẹn showroom liên hệ khi vào giờ làm việc.
+- Bỏ hoàn toàn cụm “tránh sai chương trình” trong câu báo giá/tư vấn.
+- Legacy product media request không gửi tin giới thiệu trước slide nữa; chỉ gửi tin chốt sau slide.
+- Nếu không rõ sản phẩm, bot chỉ hỏi ngắn tên sản phẩm, không xổ list sản phẩm dài.
