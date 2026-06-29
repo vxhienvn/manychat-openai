@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AIGUKA - Bảng mapping quảng cáo</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 0; background:#f6f7f9; color:#111827; }
+    header { position: sticky; top: 0; z-index: 5; background:#111827; color:#fff; padding:12px 16px; display:flex; gap:12px; align-items:center; flex-wrap:wrap; }
+    header h1 { font-size:18px; margin:0; }
+    button { cursor:pointer; border:0; border-radius:8px; padding:9px 12px; background:#2563eb; color:#fff; font-weight:600; }
+    button.secondary { background:#4b5563; }
+    button.danger { background:#dc2626; }
+    button:disabled { opacity:.55; cursor:not-allowed; }
+    .wrap { padding:16px; }
+    .notice { background:#fff7ed; border:1px solid #fed7aa; padding:10px 12px; border-radius:10px; margin-bottom:12px; }
+    .status { margin-left:auto; font-size:13px; color:#d1d5db; }
+    .tablebox { background:white; border-radius:12px; overflow:auto; border:1px solid #e5e7eb; height: calc(100vh - 145px); }
+    table { border-collapse:collapse; width:max-content; min-width:100%; }
+    th, td { border-bottom:1px solid #e5e7eb; border-right:1px solid #f0f0f0; padding:6px; vertical-align:top; }
+    th { position:sticky; top:0; background:#f3f4f6; z-index:2; font-size:12px; text-align:left; white-space:nowrap; }
+    input, select, textarea { width:100%; box-sizing:border-box; border:1px solid #d1d5db; border-radius:6px; padding:7px; font-size:13px; background:white; }
+    textarea { min-height:64px; resize:vertical; }
+    .w-id { width:150px; } .w-name { width:210px; } .w-folder { width:300px; } .w-small { width:120px; } .w-note { width:280px; }
+    .row-actions { display:flex; gap:6px; }
+    .hint { color:#6b7280; font-size:12px; margin-top:8px; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>AIGUKA - Mapping QC → Thư mục ảnh Drive</h1>
+  <button onclick="loadRows(true)">Tải lại từ Supabase</button>
+  <button onclick="saveRows()">Lưu vào Supabase</button>
+  <button class="secondary" onclick="addRow()">Thêm dòng</button>
+  <button class="secondary" onclick="loadSeed()">Nạp danh sách mẫu</button>
+  <span class="status" id="status">Đang tải...</span>
+</header>
+<div class="wrap">
+  <div class="notice">
+    Bot sẽ nạp bảng này từ Supabase khi restart. Bạn chỉ cần nhập <b>Tên thư mục ảnh trên Google Drive</b> trùng với thư mục ảnh đã tạo; bot tự lấy toàn bộ ảnh trong thư mục đó để làm slide. QC tổng hợp đặt <b>product_group=combo</b> và <b>slide_key=WELCOME_COMBO_SLIDES</b>.
+  </div>
+  <div class="tablebox">
+    <table id="tbl">
+      <thead>
+        <tr>
+          <th>TKQC</th><th>Campaign ID</th><th>Tên chiến dịch</th><th>Adset ID</th><th>Tên nhóm</th><th>Ad ID</th><th>Tên QC</th><th>Status</th>
+          <th>Nhóm đúng</th><th>Slide key</th><th>Tên thư mục ảnh Google Drive</th><th>Ghi chú</th><th>Bật</th><th>Xóa</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+  <div class="hint">
+    Nhóm đúng nên dùng: fan, combo, toilet, vanity, faucet, kitchen, bathtub, unknown. Tên thư mục Drive phải đúng với thư mục ảnh trong GOOGLE_DRIVE_PRODUCTS_ROOT_ID. Sau khi bấm Lưu, server tự reload cache RAM.
+  </div>
+</div>
+<script>
+const PRODUCT_GROUPS = ["fan","combo","toilet","vanity","faucet","kitchen","bathtub","unknown"];
+const SLIDE_KEYS = ["FAN_LIGHT_SLIDES","WELCOME_COMBO_SLIDES","SMART_TOILET_SLIDES","VANITY_LAVABO_SLIDES","FAUCET_SLIDES","KITCHEN_SLIDES","BATHTUB_SLIDES",""];
+let rows = [];
+
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+function esc(v) { return String(v ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function rowTemplate(r, i) {
+  const opts = PRODUCT_GROUPS.map(x => `<option value="${x}" ${x===(r.product_group||'')?'selected':''}>${x}</option>`).join('');
+  const slideOpts = SLIDE_KEYS.map(x => `<option value="${x}" ${x===(r.slide_key||'')?'selected':''}>${x || '(trống)'}</option>`).join('');
+  return `<tr data-i="${i}">
+    <td><input class="w-id" data-k="ad_account_id" value="${esc(r.ad_account_id)}"></td>
+    <td><input class="w-id" data-k="campaign_id" value="${esc(r.campaign_id)}"></td>
+    <td><input class="w-name" data-k="campaign_name" value="${esc(r.campaign_name)}"></td>
+    <td><input class="w-id" data-k="adset_id" value="${esc(r.adset_id)}"></td>
+    <td><input class="w-name" data-k="adset_name" value="${esc(r.adset_name)}"></td>
+    <td><input class="w-id" data-k="ad_id" value="${esc(r.ad_id)}"></td>
+    <td><input class="w-name" data-k="ad_name" value="${esc(r.ad_name)}"></td>
+    <td><input class="w-small" data-k="effective_status" value="${esc(r.effective_status)}"></td>
+    <td><select class="w-small" data-k="product_group">${opts}</select></td>
+    <td><select class="w-name" data-k="slide_key">${slideOpts}</select></td>
+    <td><input class="w-folder" data-k="drive_folder" value="${esc(r.drive_folder)}" placeholder="VD: Quạt 01 hoặc Quạt/Quạt tổng hợp 01"></td>
+    <td><textarea class="w-note" data-k="notes">${esc(r.notes)}</textarea></td>
+    <td><input type="checkbox" data-k="is_active" ${r.is_active === false ? '' : 'checked'}></td>
+    <td><button class="danger" onclick="removeRow(${i})">Xóa</button></td>
+  </tr>`;
+}
+function render() {
+  document.querySelector('#tbl tbody').innerHTML = rows.map(rowTemplate).join('');
+}
+function collect() {
+  const out = [];
+  document.querySelectorAll('#tbl tbody tr').forEach(tr => {
+    const r = {};
+    tr.querySelectorAll('[data-k]').forEach(el => {
+      const k = el.dataset.k;
+      if (el.type === 'checkbox') r[k] = el.checked;
+      else r[k] = el.value.trim();
+    });
+    if (r.ad_id) out.push(r);
+  });
+  rows = out;
+  return out;
+}
+async function loadRows(reload=false) {
+  setStatus('Đang tải...');
+  const res = await fetch('/api/ad-mapping' + (reload ? '?reload=1' : ''));
+  const data = await res.json();
+  if (!data.success) throw new Error(data.error || 'Không tải được');
+  rows = data.rows || [];
+  render();
+  setStatus(`Đã tải ${rows.length} dòng từ ${data.source || 'server'} lúc ${new Date().toLocaleTimeString()}`);
+}
+async function loadSeed() {
+  const res = await fetch('/api/ad-mapping/seed');
+  const data = await res.json();
+  rows = data.rows || [];
+  render();
+  setStatus(`Đã nạp ${rows.length} dòng mẫu. Bấm Lưu để ghi vào Supabase.`);
+}
+async function saveRows() {
+  const payload = { rows: collect() };
+  setStatus('Đang lưu...');
+  const res = await fetch('/api/ad-mapping/bulk', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  const data = await res.json();
+  if (!data.success) { setStatus('Lỗi lưu: ' + (data.error || 'unknown')); alert(data.error || 'Lỗi lưu'); return; }
+  setStatus(`Đã lưu ${data.count} dòng. Cache server đã reload.` + (data.warning ? ' ' + data.warning : ''));
+  await loadRows(true);
+}
+function addRow() {
+  rows.push({ ad_account_id:'', campaign_id:'', campaign_name:'', adset_id:'', adset_name:'', ad_id:'', ad_name:'', effective_status:'ACTIVE', product_group:'unknown', slide_key:'', drive_folder:'', notes:'', is_active:true });
+  render();
+}
+function removeRow(i) {
+  collect(); rows.splice(i, 1); render();
+}
+loadRows().catch(err => { setStatus('Lỗi tải: ' + err.message); });
+</script>
+</body>
+</html>

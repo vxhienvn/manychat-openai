@@ -195,3 +195,9 @@
 - Thêm `/supabase-replay` để xem timeline theo `sender_id`.
 - Thêm `/supabase-audit-summary` để kiểm tra nhanh tỷ lệ thiếu product/intent và phàn nàn gửi sai sản phẩm.
 - Giữ nguyên Reply Engine/Hard Product Lock/Carousel fixes của 4.0.5.
+
+## 4.2.1 - Drive Folder Mapping Fix
+- Admin mapping không yêu cầu nhập từng link ảnh nữa.
+- Cột `drive_folder` được dùng làm tên/thư mục ảnh Google Drive.
+- Bot ưu tiên lấy ảnh từ Google Drive folder theo mapping quảng cáo, sau đó mới fallback sang `image_urls` cũ hoặc product media.
+- HTML `/admin/ad-mapping.html` đổi nhãn thành “Tên thư mục ảnh Google Drive”.

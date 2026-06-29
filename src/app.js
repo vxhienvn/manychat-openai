@@ -6,7 +6,8 @@ const { loadProductRows, findBestProductRow, buildPriceRangeReply, buildProductI
 const { listProductImagesByPath, debugDrivePath, driveReady } = require('./services/productDriveService');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '2mb' }));
+app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
@@ -2499,16 +2500,116 @@ function productFromAdText(text = "") {
     return null;
 }
 
+
+// ===== AIGUKA 4.2 AD MAPPING ADMIN =====
+// Nguồn sự thật để bot nhận diện quảng cáo: Supabase.ad_mappings.
+// Khi server restart, bot nạp bảng này vào RAM. Nếu Supabase tạm lỗi, bot vẫn dùng cache local/env cũ.
+const AD_MAPPING_TABLE = process.env.AD_MAPPING_TABLE || "ad_mappings";
+let adMappingCache = { byKey: {}, rows: [], loadedAt: null, source: "empty" };
+
+const AD_MAPPING_SEED_ROWS = [
+    { ad_account_id: "972318199015585", campaign_id: "120244323248080424", campaign_name: "Quạt GUKA", adset_id: "120244325500240424", adset_name: "Quạt Tổng Hợp", ad_id: "120244325500230424", ad_name: "Quạt Tổng Hợp 01", effective_status: "ACTIVE", product_group: "fan", slide_key: "FAN_LIGHT_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "972318199015585", campaign_id: "120244323248080424", campaign_name: "Quạt GUKA", adset_id: "120244325500240424", adset_name: "Quạt Tổng Hợp", ad_id: "120244584024930424", ad_name: "Quạt Tổng Hợp 02", effective_status: "ACTIVE", product_group: "fan", slide_key: "FAN_LIGHT_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "972318199015585", campaign_id: "120244295740060424", campaign_name: "Cửa hàng", adset_id: "120244295742440424", adset_name: "Cửa hàng 20km", ad_id: "120244295745820424", ad_name: "Tổng hợp + xả kho", effective_status: "ACTIVE", product_group: "combo", slide_key: "WELCOME_COMBO_SLIDES", drive_folder: "", image_urls: [], notes: "QC tổng hợp: chỉ gửi slide chào mừng combo thiết bị vệ sinh" },
+    { ad_account_id: "972318199015585", campaign_id: "120244295740060424", campaign_name: "Cửa hàng", adset_id: "120244295742440424", adset_name: "Cửa hàng 20km", ad_id: "120244297045030424", ad_name: "Tổng hợp- Khuyến mại", effective_status: "ACTIVE", product_group: "combo", slide_key: "WELCOME_COMBO_SLIDES", drive_folder: "", image_urls: [], notes: "QC tổng hợp: chỉ gửi slide chào mừng combo thiết bị vệ sinh" },
+    { ad_account_id: "972318199015585", campaign_id: "120244295740060424", campaign_name: "Cửa hàng", adset_id: "120244295742440424", adset_name: "Cửa hàng 20km", ad_id: "120244496819900424", ad_name: "Tủ Chậu - Bản sao", effective_status: "ACTIVE", product_group: "vanity", slide_key: "VANITY_LAVABO_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "972318199015585", campaign_id: "120244298405040424", campaign_name: "Test video mới tbvs cc", adset_id: "120244300148850424", adset_name: "B2C_CC_01", ad_id: "120244497906990424", ad_name: "Lavabo, bệt AI", effective_status: "ACTIVE", product_group: "toilet", slide_key: "SMART_TOILET_SLIDES", drive_folder: "", image_urls: [], notes: "Tên có bệt AI nên ưu tiên bồn cầu thông minh; nếu muốn lavabo thì đổi product_group=vanity" },
+    { ad_account_id: "972318199015585", campaign_id: "120244298405040424", campaign_name: "Test video mới tbvs cc", adset_id: "120244621136450424", adset_name: "B2C_CC_02", ad_id: "120244621136470424", ad_name: "Bồn tắm", effective_status: "ACTIVE", product_group: "bathtub", slide_key: "BATHTUB_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "972318199015585", campaign_id: "120244298405040424", campaign_name: "Test video mới tbvs cc", adset_id: "120244621136450424", adset_name: "B2C_CC_02", ad_id: "120244621136460424", ad_name: "Chậu Vòi", effective_status: "ACTIVE", product_group: "faucet", slide_key: "FAUCET_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "773958025271034", campaign_id: "120249960006100494", campaign_name: "Quạt- Test", adset_id: "120249960006090494", adset_name: "Quạt 01", ad_id: "120249960006170494", ad_name: "Quạt 01", effective_status: "ACTIVE", product_group: "fan", slide_key: "FAN_LIGHT_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "311242249583664", campaign_id: "120251754173310195", campaign_name: "quat Guka", adset_id: "120251754173300195", adset_name: "Quạt tổng hợp 1", ad_id: "120251754173290195", ad_name: "Quạt tổng hợp 1", effective_status: "ACTIVE", product_group: "fan", slide_key: "FAN_LIGHT_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "311242249583664", campaign_id: "120251754173310195", campaign_name: "quat Guka", adset_id: "120251755097890195", adset_name: "Quạt tổng hợp 2", ad_id: "120251755097900195", ad_name: "Quạt tổng hợp 2", effective_status: "ACTIVE", product_group: "fan", slide_key: "FAN_LIGHT_SLIDES", drive_folder: "", image_urls: [], notes: "" },
+    { ad_account_id: "311242249583664", campaign_id: "120251755254580195", campaign_name: "cửa hàng", adset_id: "120251755854130195", adset_name: "cửa hàng 1", ad_id: "120251755854140195", ad_name: "cửa hàng 1", effective_status: "ACTIVE", product_group: "combo", slide_key: "WELCOME_COMBO_SLIDES", drive_folder: "", image_urls: [], notes: "QC tổng hợp: chỉ gửi slide chào mừng combo thiết bị vệ sinh" },
+    { ad_account_id: "311242249583664", campaign_id: "120251755254580195", campaign_name: "cửa hàng", adset_id: "120251755254570195", adset_name: "cửa hàng win", ad_id: "120251755254560195", ad_name: "cửa hàng win", effective_status: "ACTIVE", product_group: "combo", slide_key: "WELCOME_COMBO_SLIDES", drive_folder: "", image_urls: [], notes: "QC tổng hợp: chỉ gửi slide chào mừng combo thiết bị vệ sinh" },
+    { ad_account_id: "2908103499363342", campaign_id: "120226451816090207", campaign_name: "VIDEO1 DU HỌC", adset_id: "120226451816080207", adset_name: "111", ad_id: "120226451816070207", ad_name: "2223", effective_status: "ACTIVE", product_group: "unknown", slide_key: "", drive_folder: "", image_urls: [], notes: "Cần xác nhận vì tên không rõ sản phẩm" },
+    { ad_account_id: "2908103499363342", campaign_id: "120226451816090207", campaign_name: "VIDEO1 DU HỌC", adset_id: "120226451890260207", adset_name: "111 - Bản sao", ad_id: "120226451890250207", ad_name: "2223", effective_status: "ACTIVE", product_group: "unknown", slide_key: "", drive_folder: "", image_urls: [], notes: "Cần xác nhận vì tên không rõ sản phẩm" },
+    { ad_account_id: "2908103499363342", campaign_id: "120236893907130207", campaign_name: "123", adset_id: "120236893907140207", adset_name: "123", ad_id: "120236893907150207", ad_name: "123", effective_status: "ACTIVE", product_group: "unknown", slide_key: "", drive_folder: "", image_urls: [], notes: "Cần xác nhận vì tên không rõ sản phẩm" }
+];
+
+function normalizeAdMappingRow(row = {}) {
+    const productGroup = normalizeProductAlias(row.product_group || row.productType || row.product || "") || String(row.product_group || row.productType || row.product || "unknown").trim() || "unknown";
+    let imageUrls = row.image_urls;
+    if (typeof imageUrls === "string") {
+        imageUrls = imageUrls.split(/[\n,]+/).map(x => x.trim()).filter(Boolean);
+    }
+    if (!Array.isArray(imageUrls)) imageUrls = [];
+    return {
+        ad_account_id: String(row.ad_account_id || row.account_id || "").trim(),
+        campaign_id: String(row.campaign_id || "").trim(),
+        campaign_name: String(row.campaign_name || "").trim(),
+        adset_id: String(row.adset_id || row.ad_set_id || "").trim(),
+        adset_name: String(row.adset_name || row.ad_set_name || "").trim(),
+        ad_id: String(row.ad_id || "").trim(),
+        ad_name: String(row.ad_name || "").trim(),
+        effective_status: String(row.effective_status || row.status || "").trim(),
+        product_group: productGroup,
+        slide_key: String(row.slide_key || "").trim(),
+        // drive_folder là tên thư mục ảnh trên Google Drive.
+        // Admin chỉ cần nhập đúng tên/thư mục Drive, bot tự lấy ảnh từ đó để làm slide.
+        drive_folder: String(row.drive_folder || row.drive_folder_name || row.google_drive_folder_name || row.folder || "").trim(),
+        // image_urls chỉ giữ làm fallback kỹ thuật, giao diện admin mặc định không bắt nhập link ảnh.
+        image_urls: imageUrls,
+        notes: String(row.notes || "").trim(),
+        is_active: row.is_active === false ? false : true,
+        updated_at: new Date().toISOString()
+    };
+}
+
+function indexAdMappingRows(rows = []) {
+    const byKey = {};
+    for (const raw of rows) {
+        const row = normalizeAdMappingRow(raw);
+        if (row.ad_id) byKey[row.ad_id] = row;
+        if (row.campaign_id && !byKey[row.campaign_id]) byKey[row.campaign_id] = row;
+        if (row.adset_id && !byKey[row.adset_id]) byKey[row.adset_id] = row;
+    }
+    return byKey;
+}
+
+async function loadAdMappingsFromSupabase() {
+    if (!supabaseIsReady()) {
+        adMappingCache = { byKey: indexAdMappingRows(AD_MAPPING_SEED_ROWS), rows: AD_MAPPING_SEED_ROWS.map(normalizeAdMappingRow), loadedAt: new Date().toISOString(), source: "seed_no_supabase" };
+        return adMappingCache;
+    }
+    try {
+        const rows = await supabaseRequest(`${AD_MAPPING_TABLE}?select=*&is_active=eq.true&order=updated_at.desc&limit=5000`, { method: "GET" });
+        const finalRows = Array.isArray(rows) && rows.length ? rows.map(normalizeAdMappingRow) : AD_MAPPING_SEED_ROWS.map(normalizeAdMappingRow);
+        adMappingCache = { byKey: indexAdMappingRows(finalRows), rows: finalRows, loadedAt: new Date().toISOString(), source: Array.isArray(rows) && rows.length ? "supabase" : "seed_empty_supabase" };
+        console.log(`[AD_MAPPING] loaded ${finalRows.length} rows from ${adMappingCache.source}`);
+    } catch (error) {
+        console.error("[AD_MAPPING] load error:", error.message);
+        if (!adMappingCache.rows.length) {
+            adMappingCache = { byKey: indexAdMappingRows(AD_MAPPING_SEED_ROWS), rows: AD_MAPPING_SEED_ROWS.map(normalizeAdMappingRow), loadedAt: new Date().toISOString(), source: "seed_after_error" };
+        }
+    }
+    return adMappingCache;
+}
+
+function getMappedAdRow(key) {
+    if (!key) return null;
+    return adMappingCache.byKey[String(key)] || null;
+}
+
 function getAdProductMap() {
+    const result = {};
+    for (const row of adMappingCache.rows || []) {
+        if (!row || row.is_active === false) continue;
+        const mapped = normalizeProductAlias(row.product_group) || row.product_group;
+        if (!mapped || mapped === "unknown") continue;
+        if (row.ad_id) result[row.ad_id] = mapped;
+        if (row.campaign_id && !result[row.campaign_id]) result[row.campaign_id] = mapped;
+        if (row.adset_id && !result[row.adset_id]) result[row.adset_id] = mapped;
+    }
     try {
         const raw = process.env.AD_PRODUCT_MAP || "";
-        if (!raw.trim()) return {};
-        const parsed = JSON.parse(raw);
-        return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+        if (raw.trim()) {
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) Object.assign(result, parsed);
+        }
     } catch (error) {
         console.error("AD_PRODUCT_MAP parse error:", error.message);
-        return {};
     }
+    return result;
 }
 
 function normalizeProductAlias(value = "") {
@@ -2518,6 +2619,7 @@ function normalizeProductAlias(value = "") {
     if (["vanity", "tu_chau", "tu_lavabo", "tu_chau_guong"].includes(v)) return "vanity";
     if (["kitchen", "bep", "bep_hut_mui"].includes(v)) return "kitchen";
     if (["faucet", "sen_voi", "lavabo"].includes(v)) return "faucet";
+    if (["bathtub", "bon_tam", "bontam"].includes(v)) return "bathtub";
     if (["combo", "tbvs", "bathroom", "thiet_bi_ve_sinh"].includes(v)) return "combo";
     return null;
 }
@@ -2592,7 +2694,8 @@ function productShowcaseTitle(productType) {
     if (productType === "kitchen") return "🔥 Mẫu bếp từ - hút mùi bán chạy tháng này";
     if (productType === "vanity") return "🔥 Mẫu tủ chậu gương bán chạy tháng này";
     if (productType === "faucet") return "🔥 Mẫu lavabo - sen vòi bán chạy tháng này";
-    if (productType === "toilet") return "🔥 Mẫu thiết bị vệ sinh bán chạy tháng này";
+    if (productType === "toilet") return "🔥 Mẫu bồn cầu thông minh bán chạy tháng này";
+    if (productType === "bathtub") return "🔥 Mẫu bồn tắm bán chạy tháng này";
     return "🔥 Mẫu thiết bị vệ sinh bán chạy tháng này";
 }
 
@@ -2617,7 +2720,33 @@ async function findProductRowSafe(productType, message = "", history = "") {
 
 async function sendWelcomeProductShowcase(senderId, productType, productRow, state, adKey) {
     const mediaProduct = normalizeMediaProduct(productType);
-    const items = await loadProductMediaItems(mediaProduct, productRow);
+    const mappedAd = getMappedAdRow(adKey);
+    let items = [];
+    let source = "product_media";
+
+    // Ưu tiên đúng yêu cầu vận hành: Ad Mapping chỉ cần nhập tên thư mục Google Drive.
+    // Bot tự đọc toàn bộ ảnh trong thư mục đó và dựng slide Messenger.
+    if (mappedAd && mappedAd.drive_folder) {
+        try {
+            items = await listProductImagesByPath(mappedAd.drive_folder);
+            if (items.length) source = "ad_mapping_drive_folder";
+            else console.warn("[AD_MAPPING] Drive folder has no images", { adKey, drive_folder: mappedAd.drive_folder });
+        } catch (error) {
+            console.warn("[AD_MAPPING] Cannot load Drive folder images", { adKey, drive_folder: mappedAd.drive_folder, error: error.message });
+            items = [];
+        }
+    }
+
+    // Fallback kỹ thuật: vẫn hỗ trợ image_urls cũ nếu có dữ liệu cũ trong Supabase.
+    if (!items.length && mappedAd && Array.isArray(mappedAd.image_urls) && mappedAd.image_urls.length) {
+        source = "ad_mapping_image_urls_fallback";
+        items = mappedAd.image_urls.map((url, idx) => ({
+            title: mappedAd.ad_name || mappedAd.slide_key || `Mẫu ${idx + 1}`,
+            name: mappedAd.ad_name || mappedAd.slide_key || `Mẫu ${idx + 1}`,
+            image_url: url
+        }));
+    }
+    if (!items.length) items = await loadProductMediaItems(mediaProduct, productRow);
     if (!items.length) return { sent: false, reason: "no_items" };
 
     const count = Math.min(10, Math.max(5, items.length));
@@ -2627,7 +2756,7 @@ async function sendWelcomeProductShowcase(senderId, productType, productRow, sta
     await sendTemplate(senderId, elements, `AIGUKA4 welcome showcase ${productType}`);
 
     if (!state.welcomeShowcases || typeof state.welcomeShowcases !== "object") state.welcomeShowcases = {};
-    state.welcomeShowcases[adKey] = { productType, sentAt: Date.now(), count: elements.length };
+    state.welcomeShowcases[adKey] = { productType, sentAt: Date.now(), count: elements.length, source, drive_folder: mappedAd?.drive_folder || "" };
 
     if (!state.photoMemory || typeof state.photoMemory !== "object") state.photoMemory = {};
     const key = productPhotoKey(mediaProduct, productRow);
@@ -4376,6 +4505,84 @@ app.get('/supabase-audit-summary', async (req, res) => {
     }
 });
 
+
+
+app.get('/ad-mapping-admin', (req, res) => {
+    res.redirect('/admin/ad-mapping.html');
+});
+
+app.get('/api/ad-mapping/seed', (req, res) => {
+    res.json({ success: true, rows: AD_MAPPING_SEED_ROWS.map(normalizeAdMappingRow), count: AD_MAPPING_SEED_ROWS.length });
+});
+
+app.get('/api/ad-mapping', async (req, res) => {
+    try {
+        const force = String(req.query.reload || "") === "1";
+        if (force || !adMappingCache.loadedAt) await loadAdMappingsFromSupabase();
+        res.json({ success: true, source: adMappingCache.source, loadedAt: adMappingCache.loadedAt, rows: adMappingCache.rows || [] });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/ad-mapping/reload', async (req, res) => {
+    try {
+        await loadAdMappingsFromSupabase();
+        res.json({ success: true, source: adMappingCache.source, loadedAt: adMappingCache.loadedAt, count: adMappingCache.rows.length });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/ad-mapping/bulk', async (req, res) => {
+    try {
+        const rows = Array.isArray(req.body?.rows) ? req.body.rows.map(normalizeAdMappingRow).filter(x => x.ad_id) : [];
+        if (!rows.length) return res.status(400).json({ success: false, error: "Không có dòng hợp lệ. Mỗi dòng cần có ad_id." });
+        if (!supabaseIsReady()) {
+            adMappingCache = { byKey: indexAdMappingRows(rows), rows, loadedAt: new Date().toISOString(), source: "memory_only_supabase_disabled" };
+            return res.json({ success: true, warning: "Supabase chưa bật, dữ liệu mới chỉ lưu RAM. Bật SUPABASE_ENABLED để lưu bền vững.", count: rows.length });
+        }
+        const saved = await supabaseRequest(`${AD_MAPPING_TABLE}?on_conflict=ad_id`, {
+            method: "POST",
+            headers: { Prefer: "resolution=merge-duplicates,return=representation" },
+            body: JSON.stringify(rows)
+        });
+        await loadAdMappingsFromSupabase();
+        res.json({ success: true, count: Array.isArray(saved) ? saved.length : rows.length, source: adMappingCache.source });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/supabase-migration-4-2-ad-mapping-sql', (req, res) => {
+    res.type('text/plain').send(`create table if not exists ad_mappings (
+    id uuid primary key default gen_random_uuid(),
+    ad_account_id text,
+    campaign_id text,
+    campaign_name text,
+    adset_id text,
+    adset_name text,
+    ad_id text unique not null,
+    ad_name text,
+    effective_status text,
+    product_group text default 'unknown',
+    slide_key text,
+    -- drive_folder lưu tên/thư mục ảnh Google Drive. Admin chỉ nhập tên thư mục, bot tự lấy ảnh trong Drive.
+    drive_folder text,
+    -- image_urls chỉ là fallback cho dữ liệu cũ, không bắt buộc nhập trên giao diện.
+    image_urls jsonb default '[]'::jsonb,
+    notes text,
+    is_active boolean default true,
+    created_at timestamptz default now(),
+    updated_at timestamptz default now()
+);
+create index if not exists idx_ad_mappings_ad_id on ad_mappings(ad_id);
+create index if not exists idx_ad_mappings_campaign_id on ad_mappings(campaign_id);
+create index if not exists idx_ad_mappings_adset_id on ad_mappings(adset_id);
+create index if not exists idx_ad_mappings_product_group on ad_mappings(product_group);
+create index if not exists idx_ad_mappings_active on ad_mappings(is_active);
+`);
+});
 
 app.get('/supabase-migration-4-1-1-sql', (req, res) => {
     res.type('text/plain').send(`alter table customers add column if not exists zalo_phone text;
@@ -6249,6 +6456,9 @@ app.get('/meta-debug', async (req, res) => {
 
 
 function startBackgroundJobs() {
+    loadAdMappingsFromSupabase().catch(console.error);
+    setInterval(() => loadAdMappingsFromSupabase().catch(console.error), 5 * 60 * 1000);
+
     // Rà 1 lần khi máy chủ online lại.
     // Chỉ gửi nếu khách im 12-20h, chưa có số/Zalo, đã nhắn >= 2 tin, xác định được đúng sản phẩm, và chưa từng chăm sóc.
     setTimeout(() => {
