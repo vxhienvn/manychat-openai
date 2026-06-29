@@ -233,3 +233,10 @@
 - Cập nhật câu chào sau slide: “các mẫu sản phẩm bán chạy tháng qua…” theo yêu cầu vận hành.
 - Lọc link ảnh không phù hợp với Messenger Generic Template để giảm lỗi slide không hiển thị ảnh.
 - Bổ sung nhận diện toilet/bồn cầu với từ khóa xả nước/nút bấm/nắp rửa.
+
+## AIGUKA 4.2.5 - Conversation Ownership No-Interrupt Hotfix
+- Sửa luật cứng: Sale/Admin đã trả lời sau tin khách thì bot mất quyền trả lời, không giới hạn 5/10 phút.
+- Bot hủy pending reply nếu phát hiện admin trả lời trong RAM hoặc trong Supabase messages.
+- Bỏ câu hỏi list sản phẩm dài; nếu thật sự không rõ sản phẩm thì hỏi ngắn một câu, không xổ danh sách toàn ngành hàng.
+- Pancake sync khi phát hiện tin admin gần đây sẽ kích hoạt manual mode và hủy pending reply.
+- Không fallback về combo khi không xác định được sản phẩm.

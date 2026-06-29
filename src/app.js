@@ -422,6 +422,15 @@ async function processPendingReplyRow(row) {
             return;
         }
 
+        if (hasAdminReplyAfterLastCustomer(history) || await hasSupabaseAdminAfterLastCustomer(senderId, getLastCustomerTimeFromHistory(history))) {
+            cancelBotReplyBecauseSaleAnswered(senderId, "sale_answered_before_pending_due");
+            await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ status: "cancelled", reason: "sale_answered_before_due", processed_at: new Date().toISOString() })
+            });
+            return;
+        }
+
         await processAiguka4Workflow(senderId, { recipient: { id: row.page_id || undefined } });
         await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
             method: "PATCH",
@@ -2739,24 +2748,16 @@ function productItemLabel(item) {
 }
 
 function buildDirectProductChoiceText() {
-    const groups = [
-        "1. Quạt trần / quạt đèn",
-        "2. Thiết bị vệ sinh / phòng tắm",
-        "3. Bếp từ - hút mùi - chậu rửa bát",
-        "4. Bồn cầu thông minh / bệt liền khối",
-        "5. Tủ chậu gương / lavabo",
-        "6. Sen vòi / bồn tắm",
-        "7. Đèn trang trí"
-    ];
-    return `Dạ anh/chị đang quan tâm nhóm sản phẩm nào ạ?\n${groups.join("\n")}\nAnh/chị chọn số hoặc nhắn tên sản phẩm, em gửi đúng slide mẫu bán chạy cho mình nhé.`;
+    // 4.2.5: bỏ list ngành hàng dài. Chỉ hỏi ngắn để tránh gửi lạc chủ đề QC.
+    return "Dạ anh/chị nhắn giúp em tên sản phẩm mình đang quan tâm, em gửi đúng mẫu bán chạy cho mình nhé.";
 }
 
+
 function shouldAskProductChoice(event = {}, state = {}, productType = "", customerMessage = "") {
-    const referral = getReferralInfoFromEvent(event);
-    const hasAd = Boolean(referral.ad_id || referral.ref || referral.campaign_id || referral.adgroup_id);
-    const explicit = detectExplicitTopic(customerMessage) || detectProductItemFromText(customerMessage);
-    if (hasAd || explicit || productType || state.lockedProduct || state.currentTopic) return false;
-    return true;
+    // AIGUKA 4.2.5: bỏ hẳn câu hỏi list sản phẩm dài.
+    // Lỗi thực tế: khách đến từ QC quạt nhưng bot vẫn xổ danh sách toàn ngành hàng.
+    // Nếu chưa xác định được sản phẩm, bot chỉ hỏi ngắn ở nhánh fallback, không gửi list.
+    return false;
 }
 
 function groupFromNumericChoice(message = "") {
@@ -3391,16 +3392,44 @@ function hasAdminReplyAfterLastCustomer(history = [], windowMs = null) {
     if (!Array.isArray(history) || !history.length) return false;
     const lastCustomerTime = getLastCustomerTimeFromHistory(history);
     if (!lastCustomerTime) return false;
-    const maxWindow = windowMs == null
-        ? Number(currentWorkingSettings().admin_pause_minutes || 10) * 60 * 1000
-        : Number(windowMs || 0);
+
+    // AIGUKA 4.2.5: Sale/Admin đã trả lời sau tin khách thì AI mất quyền hội thoại.
+    // Không giới hạn 5/10 phút nữa, vì bot không được chen ngang sale.
+    // windowMs chỉ dùng khi chủ động muốn kiểm tra trong một cửa sổ thời gian cụ thể.
     for (const line of history) {
         const raw = String(line || "");
         if (!raw.startsWith("Admin:")) continue;
         const t = parseHistoryTime(raw);
-        if (t && t >= lastCustomerTime && Date.now() - t <= Math.max(maxWindow, 60 * 1000)) return true;
+        if (!t || t < lastCustomerTime) continue;
+        if (windowMs == null) return true;
+        if (Date.now() - t <= Math.max(Number(windowMs || 0), 60 * 1000)) return true;
     }
     return false;
+}
+
+async function hasSupabaseAdminAfterLastCustomer(senderId, lastCustomerTimeMs = 0) {
+    if (!supabaseIsReady() || !senderId || !lastCustomerTimeMs) return false;
+    try {
+        const since = new Date(Number(lastCustomerTimeMs)).toISOString();
+        const rows = await supabaseRequest(
+            `messages?sender_id=eq.${encodeURIComponent(String(senderId))}&role=in.(admin,page,sale)&created_at=gte.${encodeURIComponent(since)}&select=id,created_at,text,role&order=created_at.desc&limit=1`,
+            { method: "GET" }
+        );
+        return Array.isArray(rows) && Boolean(rows[0]);
+    } catch (error) {
+        console.error("hasSupabaseAdminAfterLastCustomer error:", senderId, error.message);
+        return false;
+    }
+}
+
+function cancelBotReplyBecauseSaleAnswered(senderId, reason = "sale_answered") {
+    clearCustomerReplyTimer(senderId);
+    markPendingRepliesForSender(senderId, "cancelled", reason).catch(err => console.error("Cancel pending sale answered error:", err.message));
+    const state = ensureCustomerState(senderId);
+    state.owner = "sale";
+    state.manualMode = true;
+    state.lastManualModeAt = Date.now();
+    saveCustomerStates(customerStates);
 }
 
 async function processAiguka4Workflow(senderId, event = {}) {
@@ -3420,8 +3449,9 @@ async function processAiguka4Workflow(senderId, event = {}) {
         console.log("AIGUKA4 skipped, admin takeover active:", senderId);
         return;
     }
-    if (hasAdminReplyAfterLastCustomer(history)) {
-        console.log("AIGUKA4 skipped, admin replied after latest customer:", senderId);
+    if (hasAdminReplyAfterLastCustomer(history) || await hasSupabaseAdminAfterLastCustomer(senderId, getLastCustomerTimeFromHistory(history))) {
+        console.log("AIGUKA4 skipped, sale/admin replied after latest customer:", senderId);
+        cancelBotReplyBecauseSaleAnswered(senderId, "sale_answered_before_workflow");
         return;
     }
     if (state.hasContact || hasPhoneOrContact(historyText)) {
@@ -3443,7 +3473,15 @@ async function processAiguka4Workflow(senderId, event = {}) {
         await sendProductChoiceQuestion(senderId, state, "direct_page_no_product");
         return;
     }
-    productType = productType || state.currentTopic || state.productType || "combo";
+    productType = productType || state.currentTopic || state.productType || null;
+    if (!productType) {
+        const ask = "Dạ anh/chị nhắn giúp em tên sản phẩm mình đang quan tâm, em gửi đúng mẫu bán chạy cho mình nhé.";
+        await sendMessage(senderId, ask);
+        conversations[senderId].push(`Bot: ${ask} | TIME:${Date.now()} | PRODUCT:unknown | A4_SHORT_PRODUCT_CLARIFY`);
+        saveConversations(conversations);
+        saveCustomerStates(customerStates);
+        return;
+    }
     const currentIntent = detectCustomerIntent(customerMessage);
     state.lastIntent = currentIntent;
     updateSupabaseConversationMetadata(senderId, {
@@ -3674,8 +3712,10 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
             const latestState = ensureCustomerState(senderId);
             if (latestState.hasContact) return;
             if (latestState.humanTakeoverUntil && Date.now() < Number(latestState.humanTakeoverUntil)) return;
-            if (hasAdminReplyAfterLastCustomer(conversations[senderId] || [])) {
+            const timerHistory = conversations[senderId] || [];
+            if (hasAdminReplyAfterLastCustomer(timerHistory) || await hasSupabaseAdminAfterLastCustomer(senderId, getLastCustomerTimeFromHistory(timerHistory))) {
                 console.log("Scheduled bot reply skipped because sale answered:", senderId);
+                cancelBotReplyBecauseSaleAnswered(senderId, "sale_answered_before_timer_due");
                 markPendingRepliesForSender(senderId, "cancelled", "admin_replied_before_due").catch(err => console.error("Mark pending admin replied error:", err.message));
                 return;
             }
@@ -3953,6 +3993,9 @@ function startHumanTakeover(senderId, adminText, now) {
     state.humanTakeoverUntil = now + Number(currentWorkingSettings().admin_pause_minutes || 10) * 60 * 1000;
     state.pendingHumanCustomer = false;
     state.lastAdminTime = now;
+    state.owner = "sale";
+    state.manualMode = true;
+    state.lastManualModeAt = now;
 
     clearHumanTakeoverTimer(senderId);
     clearCustomerReplyTimer(senderId);
@@ -4923,6 +4966,22 @@ async function logPancakeMessageToSupabase(conv = {}, msg = {}) {
             created_at: createdAtIso
         })
     });
+
+    // AIGUKA 4.2.5: nếu Pancake cho thấy sale/admin đã trả lời, khóa quyền hội thoại cho sale.
+    // Điều này bù cho trường hợp Meta echo không báo về server nhưng Pancake đã có tin nhân viên.
+    if (role === "admin") {
+        const ageMs = Date.now() - createdAt.getTime();
+        if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 6 * 60 * 60 * 1000) {
+            const hist = conversations[senderId] || [];
+            const exists = hist.some(line => String(line || "").startsWith("Admin:") && String(line || "").includes(text || "[pancake attachment]"));
+            if (!exists) {
+                startHumanTakeover(senderId, text || "[pancake attachment]", Date.now());
+            } else {
+                cancelBotReplyBecauseSaleAnswered(senderId, "pancake_admin_sync");
+            }
+        }
+    }
+
     return { ok: true, message: Array.isArray(inserted) ? inserted[0] : inserted, role };
 }
 
