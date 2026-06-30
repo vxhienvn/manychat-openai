@@ -1,42 +1,13 @@
-# AIGUKA 4.1.1
+# AIGUKA 4.1.6 universal-message-log
 
-Bản cập nhật trên nền 3.9.11, bổ sung nhận diện nhóm **tủ chậu gương / tủ lavabo** trong Bathroom và gửi mẫu từ Google Drive khi khách xin mẫu/xem thêm.
+Bản này tập trung sửa module log hội thoại để Debug API đọc được đầy đủ hơn:
 
-## Deploy
+- Ghi `source` và `external_message_id` cho message nếu DB đã có cột.
+- Nếu DB chưa có cột mới, fallback vẫn insert message tối thiểu để không mất tin.
+- Ghi log cả các tin bot bị chặn bởi nút tắt bot, sale takeover hoặc chống lặp.
+- Ghi log postback/button click của khách.
+- Ghi log tin ảnh bot gửi.
+- Bổ sung guard sale takeover cho gửi ảnh.
+- Debug API trả thêm `source`, `external_message_id` nếu có.
 
-```bash
-git add .
-git commit -m "AIGUKA 4.1.1 - Add vanity cabinet mirror intent"
-git push origin main
-```
-
-## Test nhanh
-
-```text
-Tủ chậu gương
-Tủ lavabo có mẫu không
-Cho xem mẫu tủ chậu
-Gương lavabo giá bao nhiêu
-Xin mẫu tủ chậu gương
-```
-
-## Ghi chú
-
-- Bot map nhóm này vào `vanity`.
-- Google Drive folder fallback: `Bathroom/tủ chậu gương`.
-- Nếu Google Sheet chưa có dòng tủ chậu gương, bot vẫn có thể lấy ảnh từ Drive bằng fallback row.
-- Nếu có dòng trong Google Sheet, Sheet vẫn được ưu tiên để lấy khoảng giá và path.
-
-## AIGUKA 4.1.4 Debug API
-
-Các endpoint đọc Supabase trực tiếp, chỉ đọc, không gửi tin nhắn:
-
-- `GET /api/debug/health`
-- `GET /api/debug/latest-conversations?limit=10`
-- `GET /api/debug/conversation/:conversation_id`
-- `GET /api/debug/search-messages?q=0973693677&limit=20`
-
-Khuyến nghị đặt biến môi trường `DEBUG_API_KEY=<mật_khẩu_riêng>` trên Render/Railway. Khi đó gọi API kèm `?key=<mật_khẩu_riêng>` hoặc header `x-debug-key`.
-
-Ví dụ:
-`https://your-domain.com/api/debug/latest-conversations?limit=10&key=YOUR_DEBUG_KEY`
+Lưu ý: bản này không cố backfill các tin cũ đã mất trong DB. Sau deploy, các tin mới phát sinh sẽ được ghi tốt hơn.

@@ -203,7 +203,7 @@ function extractPostIdFromEvent(event = {}) {
     return ref.post_id || ref.post?.id || ref.post?.post_id || event?.postback?.payload || "";
 }
 
-async function logMessageToSupabase({ event = null, senderId = "", pageId = "", role = "customer", text = "", messageType = "text", raw = null, productGroup = "", intent = "", attachmentUrl = "" }) {
+async function logMessageToSupabase({ event = null, senderId = "", pageId = "", role = "customer", text = "", messageType = "text", raw = null, productGroup = "", intent = "", attachmentUrl = "", source = "", externalMessageId = "" }) {
     if (!supabaseIsReady()) return { skipped: true };
 
     // 4.1.5 HOTFIX:
@@ -229,6 +229,8 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
         const finalIntent = intent || detectCustomerIntent(text);
         const finalPageId = pageId || eventPageId || stateForLog.lastPageId || PANCAKE_PAGE_ID || "";
         const messageCreatedAt = event?.timestamp ? new Date(Number(event.timestamp)).toISOString() : new Date().toISOString();
+        const finalSource = source || raw?.source || (event ? (isEcho ? "meta_echo" : "meta_webhook") : "bot_runtime");
+        const finalExternalMessageId = externalMessageId || event?.message?.mid || event?.postback?.mid || raw?.external_message_id || raw?.pancake_message_id || "";
 
         if (finalPageId && stateForLog && !stateForLog.lastPageId) {
             stateForLog.lastPageId = finalPageId;
@@ -262,7 +264,7 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
 
         const mappedForLog = adId ? getMappedAdRow(adId) : null;
         const productItemForLog = detectProductItemFromText(text || rawContextText || "", finalProduct) || findProductItemByKey(stateForLog.productItemKey || mappedForLog?.product_item_key || "");
-        const baseRaw = { ...(raw || event || {}), contact_info: typeof contact !== "undefined" ? contact : undefined };
+        const baseRaw = { ...(raw || event || {}), source: finalSource || undefined, external_message_id: finalExternalMessageId || undefined, contact_info: typeof contact !== "undefined" ? contact : undefined };
         const extendedPayload = {
             conversation_id: conversation?.id || null,
             customer_id: customer?.id || null,
@@ -284,6 +286,8 @@ async function logMessageToSupabase({ event = null, senderId = "", pageId = "", 
             drive_folder: productItemForLog?.drive_folder || mappedForLog?.drive_folder || null,
             fallback_reason: raw?.fallback_reason || raw?.reason || null,
             intent: finalIntent || null,
+            source: finalSource || null,
+            external_message_id: finalExternalMessageId || null,
             created_at: messageCreatedAt
         };
 
@@ -1129,6 +1133,8 @@ function compactDebugMessage(row, includeRaw = false) {
         post_id: row.post_id,
         product_group: row.product_group,
         intent: row.intent,
+        source: row.source || row.raw?.source || null,
+        external_message_id: row.external_message_id || row.raw?.external_message_id || row.raw?.pancake_message_id || null,
         created_at: row.created_at
     };
     if (includeRaw) out.raw = row.raw;
@@ -1150,7 +1156,7 @@ async function debugFetchMessagesForConversationIds(ids, includeRaw = false, per
     if (!cleanIds.length) return [];
     // Supabase/PostgREST in.(uuid1,uuid2). ids do DB sinh UUID nên không chứa ký tự nguy hiểm.
     const inList = cleanIds.map(id => id.replace(/[^a-zA-Z0-9_-]/g, '')).join(',');
-    const select = includeRaw ? '*' : 'id,conversation_id,sender_id,role,message_type,text,attachment_url,ad_id,post_id,product_group,intent,created_at';
+    const select = '*';
     const limit = Math.min(cleanIds.length * perConversationLimit, 2000);
     return await supabaseRequest(`messages?conversation_id=in.(${inList})&select=${select}&order=created_at.asc&limit=${limit}`, { method: 'GET' });
 }
@@ -1228,7 +1234,7 @@ app.get('/api/debug/search-messages', async (req, res) => {
         if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
         const limit = clampDebugLimit(req.query.limit, 20, 100);
         const includeRaw = String(req.query.include_raw || 'false').toLowerCase() === 'true';
-        const select = includeRaw ? '*' : 'id,conversation_id,sender_id,role,message_type,text,attachment_url,ad_id,post_id,product_group,intent,created_at';
+        const select = '*';
         const encoded = encodeURIComponent(`*${q.replace(/[%*]/g, '')}*`);
         const messages = await supabaseRequest(
             `messages?text=ilike.${encoded}&select=${select}&order=created_at.desc&limit=${limit}`,
@@ -1695,12 +1701,33 @@ function isDuplicateBotOutbound(senderId, text = "") {
     return false;
 }
 
+
+function logBlockedBotReply(senderId, text, reason = "blocked", messageType = "text", extraRaw = {}) {
+    try {
+        const st = customerStates[String(senderId)] || {};
+        logMessageToSupabase({
+            senderId,
+            pageId: st.lastPageId || "",
+            role: "bot_blocked",
+            text: String(text || ""),
+            messageType,
+            productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
+            intent: "bot_reply_blocked",
+            source: "bot_guard",
+            raw: { source: "bot_guard", blocked_reason: reason, ...extraRaw }
+        }).catch(err => console.error("Supabase blocked bot log error:", err.message));
+    } catch (err) {
+        console.error("Blocked bot logger error:", err.message);
+    }
+}
+
 async function sendMessage(senderId, text, options = {}) {
     const stateForGuard = ensureCustomerState(senderId);
 
     // MASTER SWITCH: tắt/bật trả lời bot từ Admin. Khi OFF, bot vẫn nhận webhook và lưu DB nhưng không gửi tin ra Messenger.
     if (!isBotReplyEnabled()) {
         console.log("[BOT_REPLY_SWITCH] blocked text reply", senderId, String(text || '').slice(0, 120));
+        logBlockedBotReply(senderId, text, "reply_switch_off", "text");
         return false;
     }
 
@@ -1708,11 +1735,13 @@ async function sendMessage(senderId, text, options = {}) {
     // Không để GPT/template/follow-up/timer chen ngang sale.
     if (!options.force && isBotHardPaused(senderId)) {
         console.log("AIGUKA SAFE_SEND blocked: human takeover active", senderId, new Date(Number(stateForGuard.humanTakeoverUntil)).toISOString());
+        logBlockedBotReply(senderId, text, "human_takeover_active", "text", { humanTakeoverUntil: stateForGuard.humanTakeoverUntil });
         return false;
     }
 
     if (!options.force && isDuplicateBotOutbound(senderId, text)) {
         console.log("AIGUKA SAFE_SEND blocked: duplicate/rapid phone ask", senderId, String(text || '').slice(0, 120));
+        logBlockedBotReply(senderId, text, "duplicate_or_rapid_phone_ask", "text");
         return false;
     }
 
@@ -1755,7 +1784,8 @@ async function sendMessage(senderId, text, options = {}) {
         messageType: "text",
         productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
         intent: "bot_reply",
-        raw: { facebook_status: response.status, facebook_result: result }
+        source: "bot_api_send",
+        raw: { source: "bot_api_send", facebook_status: response.status, facebook_result: result }
     }).catch(err => console.error("Supabase bot text log error:", err.message));
 }
 
@@ -1865,6 +1895,7 @@ async function sendTemplate(senderId, elements, logName) {
     // MASTER SWITCH: chặn mọi template/carousel khi tắt bot từ Admin.
     if (!isBotReplyEnabled()) {
         console.log("[BOT_REPLY_SWITCH] blocked template reply", senderId, logName || "template");
+        logBlockedBotReply(senderId, `[template:${logName || "generic"}]`, "reply_switch_off", "template", { logName });
         return false;
     }
 
@@ -1872,6 +1903,7 @@ async function sendTemplate(senderId, elements, logName) {
     if (isBotHardPaused(senderId)) {
         const st = customerStates[String(senderId)] || {};
         console.log("AIGUKA SAFE_TEMPLATE blocked: human takeover active", senderId, st.humanTakeoverUntil ? new Date(Number(st.humanTakeoverUntil)).toISOString() : "");
+        logBlockedBotReply(senderId, `[template:${logName || "generic"}]`, "human_takeover_active", "template", { logName, humanTakeoverUntil: st.humanTakeoverUntil });
         return false;
     }
 
@@ -1915,7 +1947,8 @@ async function sendTemplate(senderId, elements, logName) {
         messageType: "template",
         productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
         intent: "bot_template",
-        raw: { elements: safeElements, enhanced_elements: enhancedElements, original_elements: elements, facebook_status: response.status, facebook_result: result }
+        source: "bot_api_send",
+        raw: { source: "bot_api_send", elements: safeElements, enhanced_elements: enhancedElements, original_elements: elements, facebook_status: response.status, facebook_result: result }
     }).catch(err => console.error("Supabase bot template log error:", err.message));
 }
 
@@ -2285,6 +2318,14 @@ async function sendImageMessage(senderId, imageUrl, logName = "Image message") {
     // MASTER SWITCH: chặn ảnh khi tắt bot từ Admin.
     if (!isBotReplyEnabled()) {
         console.log("[BOT_REPLY_SWITCH] blocked image reply", senderId, logName || "image");
+        logBlockedBotReply(senderId, `[image:${imageUrl || logName || "image"}]`, "reply_switch_off", "image", { logName, imageUrl });
+        return false;
+    }
+
+    if (isBotHardPaused(senderId)) {
+        const st = customerStates[String(senderId)] || {};
+        console.log("AIGUKA SAFE_IMAGE blocked: human takeover active", senderId, st.humanTakeoverUntil ? new Date(Number(st.humanTakeoverUntil)).toISOString() : "");
+        logBlockedBotReply(senderId, `[image:${imageUrl || logName || "image"}]`, "human_takeover_active", "image", { logName, imageUrl, humanTakeoverUntil: st.humanTakeoverUntil });
         return false;
     }
 
@@ -2314,6 +2355,19 @@ async function sendImageMessage(senderId, imageUrl, logName = "Image message") {
     if (!response.ok) {
         throw new Error(`${logName} failed: ${response.status} - ${result}`);
     }
+
+    const st = customerStates[String(senderId)] || {};
+    logMessageToSupabase({
+        senderId,
+        pageId: st.lastPageId || "",
+        role: "bot",
+        text: `[image:${logName || "image"}] ${imageUrl || ""}`,
+        messageType: "image",
+        productGroup: toDbProductGroup(st.currentTopic || st.productType || st.lockedProduct || "") || "",
+        intent: "bot_image",
+        source: "bot_api_send",
+        raw: { source: "bot_api_send", imageUrl, logName, facebook_status: response.status, facebook_result: result }
+    }).catch(err => console.error("Supabase bot image log error:", err.message));
 }
 
 function getStaticProductItems(productType) {
@@ -4447,6 +4501,20 @@ async function handleProductMediaRequest(senderId, customerMessage, currentHisto
 }
 
 async function handleMessage(event) {
+    // Log postback/quick button clicks too. Trước đây nhánh này return sớm nên mất message.
+    if (!event.message && event.postback) {
+        const senderId = event.sender?.id;
+        const pageId = event.recipient?.id;
+        if (!senderId) return;
+        const payload = event.postback?.payload || "";
+        const title = event.postback?.title || "";
+        const text = title || payload || "[postback]";
+        const state = ensureCustomerState(senderId);
+        if (pageId && !state.lastPageId) state.lastPageId = pageId;
+        recordInternalMessageEvent({ event, senderId, pageId, direction: "customer", text, state });
+        await logMessageToSupabase({ event, senderId, pageId, role: "customer", text, messageType: "postback", productGroup: state.currentTopic || state.productType || "", intent: detectCustomerIntent(text), source: "meta_postback", raw: { source: "meta_postback", payload, title, event } });
+        return;
+    }
     if (!event.message) return;
 
     // 4.1.5 HOTFIX:
@@ -4474,13 +4542,13 @@ async function handleMessage(event) {
         aiTrace(senderId, "00-ECHO", { text: echoText, app_id: event.message.app_id || "", takeoverEnabled: shouldHandleEchoAsHumanAdmin(event) });
         if (shouldHandleEchoAsHumanAdmin(event) && !isOwnBotEcho(senderId, event)) {
             startHumanTakeover(senderId, echoText, now);
-            logMessageToSupabase({ event, senderId, pageId, role: "admin", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text' })
+            logMessageToSupabase({ event, senderId, pageId, role: "admin", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text', source: "meta_admin_echo" })
                 .catch(err => console.error("Supabase admin log error:", err.message));
         } else {
             console.log("Echo ignored to keep bot replying:", senderId);
             // 4.0.5: không bỏ mất echo không phân loại được; lưu để audit/replay đầy đủ hơn.
             if (echoText) {
-                logMessageToSupabase({ event, senderId, pageId, role: "echo_unknown", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text' })
+                logMessageToSupabase({ event, senderId, pageId, role: "echo_unknown", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text', source: "meta_echo_unknown" })
                     .catch(err => console.error("Supabase echo_unknown log error:", err.message));
             }
         }
@@ -4504,7 +4572,7 @@ async function handleMessage(event) {
 
     // AIGUKA 3.8: lưu mọi tin nhắn khách trực tiếp từ Meta Webhook trước khi xử lý AI/Pancake.
     recordInternalMessageEvent({ event, senderId, pageId, direction: "customer", text: customerMessage, state });
-    await logMessageToSupabase({ event, senderId, pageId, role: "customer", text: customerMessage, messageType: "text", productGroup: state.currentTopic || state.productType || "" });
+    await logMessageToSupabase({ event, senderId, pageId, role: "customer", text: customerMessage, messageType: "text", productGroup: state.currentTopic || state.productType || "", source: "meta_customer_message" });
 
     // AIGUKA 4.0: chuyển toàn bộ khách hàng qua Workflow Engine mới.
     // Code quyết định: chờ admin 10p/5p, khóa sản phẩm, gửi welcome carousel, chống lặp flow.
@@ -5348,6 +5416,8 @@ async function logPancakeMessageToSupabase(conv = {}, msg = {}) {
             post_id: null,
             product_group: productGroup || null,
             intent: intent || null,
+            source: "pancake_sync",
+            external_message_id: externalId || null,
             created_at: createdAtIso
         })
     });
