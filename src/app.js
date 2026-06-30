@@ -204,73 +204,120 @@ function extractPostIdFromEvent(event = {}) {
 }
 
 async function logMessageToSupabase({ event = null, senderId = "", pageId = "", role = "customer", text = "", messageType = "text", raw = null, productGroup = "", intent = "", attachmentUrl = "" }) {
-    if (!supabaseIsReady() || !senderId) return { skipped: true };
+    if (!supabaseIsReady()) return { skipped: true };
+
+    // 4.1.5 HOTFIX:
+    // - Echo/page message: event.sender = Page, event.recipient = customer. Phải lưu theo customer sender_id.
+    // - Customer message: event.sender = customer, event.recipient = Page.
+    // Lỗi cũ làm admin/bot log vào conversation meta:page:... hoặc insert message fail âm thầm.
+    const isEcho = Boolean(event?.message?.is_echo);
+    const eventCustomerId = isEcho ? event?.recipient?.id : event?.sender?.id;
+    const eventPageId = isEcho ? event?.sender?.id : event?.recipient?.id;
+    const effectiveSenderId = String((isEcho && eventCustomerId) ? eventCustomerId : (senderId || eventCustomerId || ""));
+    if (!effectiveSenderId) return { skipped: true, reason: "missing_sender_id" };
+
     try {
         const attachments = event?.message?.attachments || [];
         const contact = detectContactInfo(text, attachments);
         const referral = event ? getReferralInfoFromEvent(event) : {};
         const adId = referral.ad_id || "";
         const postId = extractPostIdFromEvent(event || {});
-        const stateForLog = customerStates[senderId] || {};
+        const stateForLog = customerStates[effectiveSenderId] || {};
         const rawContextText = extractTextDeep(event || {}).join(" ");
         const inferredProduct = detectExplicitTopic([text, rawContextText].join(" ")) || stateForLog.productLock || stateForLog.lockedProduct || stateForLog.currentTopic || stateForLog.productType || "";
         const finalProduct = productGroup || toDbProductGroup(inferredProduct) || "";
         const finalIntent = intent || detectCustomerIntent(text);
-        const finalPageId = pageId || event?.recipient?.id || stateForLog.lastPageId || "";
+        const finalPageId = pageId || eventPageId || stateForLog.lastPageId || PANCAKE_PAGE_ID || "";
+        const messageCreatedAt = event?.timestamp ? new Date(Number(event.timestamp)).toISOString() : new Date().toISOString();
 
+        if (finalPageId && stateForLog && !stateForLog.lastPageId) {
+            stateForLog.lastPageId = finalPageId;
+        }
         if (finalProduct && stateForLog && !stateForLog.productLock) {
             stateForLog.productLock = finalProduct;
             stateForLog.lockedProduct = finalProduct;
-            customerStates[senderId] = stateForLog;
+            customerStates[effectiveSenderId] = stateForLog;
             saveCustomerStates(customerStates);
         }
 
         const customer = await supabaseUpsertCustomer({
-            senderId,
+            senderId: effectiveSenderId,
             pageId: finalPageId,
             phone: contact.phone || "",
             zalo: contact.zalo_phone || "",
             contactInfo: contact,
             productGroup: finalProduct,
-            source: "meta_webhook"
+            source: event ? "meta_webhook" : "bot_runtime"
         });
 
         const conversation = await supabaseGetOrCreateConversation({
             customerId: customer?.id,
-            senderId,
+            senderId: effectiveSenderId,
             pageId: finalPageId,
             adId,
             postId,
-            productGroup: finalProduct
+            productGroup: finalProduct,
+            createdAt: messageCreatedAt
         });
 
         const mappedForLog = adId ? getMappedAdRow(adId) : null;
         const productItemForLog = detectProductItemFromText(text || rawContextText || "", finalProduct) || findProductItemByKey(stateForLog.productItemKey || mappedForLog?.product_item_key || "");
-        const rows = await supabaseRequest("messages", {
-            method: "POST",
-            body: JSON.stringify({
-                conversation_id: conversation?.id || null,
-                customer_id: customer?.id || null,
-                sender_id: String(senderId),
-                page_id: finalPageId || null,
-                role,
-                message_type: messageType || "text",
-                text: String(text || ""),
-                attachment_url: attachmentUrl || null,
-                raw: { ...(raw || event || {}), contact_info: typeof contact !== "undefined" ? contact : undefined },
-                ad_id: adId || null,
-                post_id: postId || null,
-                product_group: finalProduct || null,
-                product_item_key: productItemForLog?.product_item_key || stateForLog.productItemKey || mappedForLog?.product_item_key || null,
-                ad_name: mappedForLog?.ad_name || null,
-                campaign_name: mappedForLog?.campaign_name || null,
-                adset_name: mappedForLog?.adset_name || null,
-                carousel_key: mappedForLog?.slide_key || null,
-                drive_folder: productItemForLog?.drive_folder || mappedForLog?.drive_folder || null,
-                fallback_reason: raw?.fallback_reason || raw?.reason || null,
-                intent: finalIntent || null
-            })
-        });
+        const baseRaw = { ...(raw || event || {}), contact_info: typeof contact !== "undefined" ? contact : undefined };
+        const extendedPayload = {
+            conversation_id: conversation?.id || null,
+            customer_id: customer?.id || null,
+            sender_id: effectiveSenderId,
+            page_id: finalPageId || null,
+            role,
+            message_type: messageType || "text",
+            text: String(text || ""),
+            attachment_url: attachmentUrl || null,
+            raw: baseRaw,
+            ad_id: adId || null,
+            post_id: postId || null,
+            product_group: finalProduct || null,
+            product_item_key: productItemForLog?.product_item_key || stateForLog.productItemKey || mappedForLog?.product_item_key || null,
+            ad_name: mappedForLog?.ad_name || null,
+            campaign_name: mappedForLog?.campaign_name || null,
+            adset_name: mappedForLog?.adset_name || null,
+            carousel_key: mappedForLog?.slide_key || null,
+            drive_folder: productItemForLog?.drive_folder || mappedForLog?.drive_folder || null,
+            fallback_reason: raw?.fallback_reason || raw?.reason || null,
+            intent: finalIntent || null,
+            created_at: messageCreatedAt
+        };
+
+        // Fallback tối thiểu để không bao giờ mất message nếu DB chưa migrate đủ cột 4.x.
+        const basicPayload = {
+            conversation_id: conversation?.id || null,
+            customer_id: customer?.id || null,
+            sender_id: effectiveSenderId,
+            page_id: finalPageId || null,
+            role,
+            message_type: messageType || "text",
+            text: String(text || ""),
+            attachment_url: attachmentUrl || null,
+            raw: baseRaw,
+            ad_id: adId || null,
+            post_id: postId || null,
+            product_group: finalProduct || null,
+            intent: finalIntent || null,
+            created_at: messageCreatedAt
+        };
+
+        let rows;
+        try {
+            rows = await supabaseRequest("messages", {
+                method: "POST",
+                body: JSON.stringify(extendedPayload)
+            });
+        } catch (insertError) {
+            console.error("[SUPABASE_MESSAGE_EXTENDED_FAILED] retry basic payload:", insertError.message);
+            rows = await supabaseRequest("messages", {
+                method: "POST",
+                body: JSON.stringify(basicPayload)
+            });
+        }
         return { ok: true, customer, conversation, message: Array.isArray(rows) ? rows[0] : rows };
     } catch (error) {
         console.error("Supabase logger error:", error.message);
@@ -4402,7 +4449,13 @@ async function handleProductMediaRequest(senderId, customerMessage, currentHisto
 async function handleMessage(event) {
     if (!event.message) return;
 
-    const senderId = event.sender?.id || event.recipient?.id;
+    // 4.1.5 HOTFIX:
+    // Customer message: sender = customer, recipient = page.
+    // Echo/admin/page message: sender = page, recipient = customer.
+    // Nếu dùng event.sender cho echo, bot sẽ khóa nhầm PAGE_ID thay vì khách => vẫn cướp lời sale.
+    const isEcho = Boolean(event.message?.is_echo);
+    const senderId = isEcho ? event.recipient?.id : event.sender?.id;
+    const pageId = isEcho ? event.sender?.id : event.recipient?.id;
     if (!senderId) return;
 
     if (!conversations[senderId]) {
@@ -4410,6 +4463,7 @@ async function handleMessage(event) {
     }
 
     const state = ensureCustomerState(senderId);
+    if (pageId && !state.lastPageId) state.lastPageId = pageId;
     const now = Date.now();
 
     // Nếu admin/page trả lời thủ công, webhook sẽ gửi echo.
@@ -4420,13 +4474,13 @@ async function handleMessage(event) {
         aiTrace(senderId, "00-ECHO", { text: echoText, app_id: event.message.app_id || "", takeoverEnabled: shouldHandleEchoAsHumanAdmin(event) });
         if (shouldHandleEchoAsHumanAdmin(event) && !isOwnBotEcho(senderId, event)) {
             startHumanTakeover(senderId, echoText, now);
-            logMessageToSupabase({ event, senderId, pageId: event.recipient?.id, role: "admin", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text' })
+            logMessageToSupabase({ event, senderId, pageId, role: "admin", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text' })
                 .catch(err => console.error("Supabase admin log error:", err.message));
         } else {
             console.log("Echo ignored to keep bot replying:", senderId);
             // 4.0.5: không bỏ mất echo không phân loại được; lưu để audit/replay đầy đủ hơn.
             if (echoText) {
-                logMessageToSupabase({ event, senderId, pageId: event.recipient?.id, role: "echo_unknown", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text' })
+                logMessageToSupabase({ event, senderId, pageId, role: "echo_unknown", text: echoText, messageType: echoText.startsWith('[attachment:') ? 'attachment' : 'text' })
                     .catch(err => console.error("Supabase echo_unknown log error:", err.message));
             }
         }
@@ -4449,8 +4503,8 @@ async function handleMessage(event) {
     }
 
     // AIGUKA 3.8: lưu mọi tin nhắn khách trực tiếp từ Meta Webhook trước khi xử lý AI/Pancake.
-    recordInternalMessageEvent({ event, senderId, pageId: event.recipient?.id, direction: "customer", text: customerMessage, state });
-    await logMessageToSupabase({ event, senderId, pageId: event.recipient?.id, role: "customer", text: customerMessage, messageType: "text", productGroup: state.currentTopic || state.productType || "" });
+    recordInternalMessageEvent({ event, senderId, pageId, direction: "customer", text: customerMessage, state });
+    await logMessageToSupabase({ event, senderId, pageId, role: "customer", text: customerMessage, messageType: "text", productGroup: state.currentTopic || state.productType || "" });
 
     // AIGUKA 4.0: chuyển toàn bộ khách hàng qua Workflow Engine mới.
     // Code quyết định: chờ admin 10p/5p, khóa sản phẩm, gửi welcome carousel, chống lặp flow.
