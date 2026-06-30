@@ -12,7 +12,7 @@ app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AIGUKA_VERSION = '5.0.0-modular-core-alpha';
+const AIGUKA_VERSION = '5.1.0-modular-production-candidate';
 const moduleRegistry = require('./core-module-registry');
 
 // ===== AIGUKA BOT REPLY MASTER SWITCH =====
@@ -1536,6 +1536,43 @@ async function debugFetchMessagesForConversationIds(ids, includeRaw = false, per
     return await supabaseRequest(`messages?conversation_id=in.(${inList})&select=${select}&order=created_at.asc&limit=${limit}`, { method: 'GET' });
 }
 
+
+app.get('/', (req, res) => res.redirect('/admin-v5'));
+app.get('/admin-v5', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'v5-admin.html')));
+app.get('/api/version', (req, res) => res.json({ ok: true, version: AIGUKA_VERSION, build: 'modular-production-candidate', reply_enabled: isBotReplyEnabled(), modules: moduleRegistry.health() }));
+
+app.get('/api/v5/status', (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    const modules = moduleRegistry.health();
+    res.json({
+        ok: true,
+        version: AIGUKA_VERSION,
+        reply_enabled: isBotReplyEnabled(),
+        supabase_ready: supabaseIsReady(),
+        modules,
+        safe_for_live_test: true,
+        notes: [
+            'reply_bot_v5 handles customer care when master reply switch is ON',
+            'legacy_reply_bot is OFF by default to prevent duplicate replies',
+            'slide_engine is OFF by default; enable only after slide mapping is verified',
+            'sale_lock and policy_engine should stay ON in production'
+        ]
+    });
+});
+app.post('/api/v5/test-reply', (req, res) => {
+    try {
+        const message = String(req.body?.message || '').trim();
+        const detectedProduct = toDbProductGroup(detectExplicitTopic(message) || '') || '';
+        const productType = req.body?.productType || detectedProduct || '';
+        const intent = req.body?.intent || detectCustomerIntent(message);
+        const c = detectContactInfo(message);
+        const reply = v5BuildOneShotReply({ productType, intent, message, state: {}, hasContact: Boolean(c.phone || c.zalo_phone) });
+        res.json({ ok: true, version: AIGUKA_VERSION, input: { message, productType, intent, contact: c }, reply });
+    } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+    }
+});
+
 app.get('/api/debug/health', async (req, res) => {
     if (!requireAigukaDebugAccess(req, res)) return;
     res.json({
@@ -1546,6 +1583,9 @@ app.get('/api/debug/health', async (req, res) => {
         reply_enabled: isBotReplyEnabled(),
         debug_key_required: Boolean(String(process.env.DEBUG_API_KEY || '').trim()),
         endpoints: [
+            'GET /admin-v5',
+            'GET /api/version',
+            'GET /api/modules',
             'GET /api/debug/latest-conversations?limit=10&include_raw=false',
             'GET /api/debug/conversation/:conversation_id?include_raw=false',
             'GET /api/debug/sender/:sender_id?include_raw=false',
@@ -6363,6 +6403,10 @@ app.get('/api/sync/messenger/sender/:senderId', async (req, res) => {
 });
 
 app.get('/api/bot-reply-switch', (req, res) => {
+    if (typeof req.query.enabled !== 'undefined' || typeof req.query.reply_enabled !== 'undefined') {
+        const v = req.query.enabled ?? req.query.reply_enabled;
+        setBotReplyEnabled(String(v).toLowerCase() === 'true' || String(v) === '1' || String(v).toLowerCase() === 'on');
+    }
     res.json({ success: true, reply_enabled: isBotReplyEnabled(), source: 'runtime_memory', env_default: String(process.env.BOT_REPLY_ENABLED || 'false') });
 });
 
