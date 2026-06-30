@@ -13,6 +13,18 @@ const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
+// ===== AIGUKA BOT REPLY MASTER SWITCH =====
+// Default OFF for safety. Set BOT_REPLY_ENABLED=true in env or turn on from Admin UI.
+let BOT_REPLY_ENABLED = String(process.env.BOT_REPLY_ENABLED || "false").toLowerCase() === "true";
+function isBotReplyEnabled() {
+    return BOT_REPLY_ENABLED === true;
+}
+function setBotReplyEnabled(value) {
+    BOT_REPLY_ENABLED = value === true;
+    console.log(`[BOT_REPLY_SWITCH] ${BOT_REPLY_ENABLED ? "ON" : "OFF"}`);
+    return BOT_REPLY_ENABLED;
+}
+
 // ===== AIGUKA 4.0 LTS SUPABASE LOGGER =====
 // Supabase dùng làm bộ nhớ dài hạn: lưu khách, phiên hội thoại, tin nhắn, bot events.
 // Nếu Supabase lỗi, bot vẫn tiếp tục chạy bằng JSON local để tránh mất khách.
@@ -1477,6 +1489,12 @@ function isDuplicateBotOutbound(senderId, text = "") {
 async function sendMessage(senderId, text, options = {}) {
     const stateForGuard = ensureCustomerState(senderId);
 
+    // MASTER SWITCH: tắt/bật trả lời bot từ Admin. Khi OFF, bot vẫn nhận webhook và lưu DB nhưng không gửi tin ra Messenger.
+    if (!isBotReplyEnabled()) {
+        console.log("[BOT_REPLY_SWITCH] blocked text reply", senderId, String(text || '').slice(0, 120));
+        return false;
+    }
+
     // KHÓA CỨNG: khi sale/admin đã vào trả lời, mọi đường gửi tin của bot đều bị chặn tại cửa cuối.
     // Không để GPT/template/follow-up/timer chen ngang sale.
     if (!options.force && isBotHardPaused(senderId)) {
@@ -1635,6 +1653,12 @@ function sanitizeMessengerElements(elements = []) {
 }
 
 async function sendTemplate(senderId, elements, logName) {
+    // MASTER SWITCH: chặn mọi template/carousel khi tắt bot từ Admin.
+    if (!isBotReplyEnabled()) {
+        console.log("[BOT_REPLY_SWITCH] blocked template reply", senderId, logName || "template");
+        return false;
+    }
+
     // KHÓA CỨNG giống sendMessage: template/carousel cũng không được chen ngang sale.
     if (isBotHardPaused(senderId)) {
         const st = customerStates[String(senderId)] || {};
@@ -2049,6 +2073,12 @@ const PRODUCT_IMAGE_GALLERIES = {
 };
 
 async function sendImageMessage(senderId, imageUrl, logName = "Image message") {
+    // MASTER SWITCH: chặn ảnh khi tắt bot từ Admin.
+    if (!isBotReplyEnabled()) {
+        console.log("[BOT_REPLY_SWITCH] blocked image reply", senderId, logName || "image");
+        return false;
+    }
+
     const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
 
     const response = await fetch(url, {
@@ -5315,6 +5345,17 @@ app.post('/api/product-items/bulk', async (req, res) => {
     } catch (error) {
         res.status(500).json({ success: false, error: error.message });
     }
+});
+
+
+app.get('/api/bot-reply-switch', (req, res) => {
+    res.json({ success: true, reply_enabled: isBotReplyEnabled(), source: 'runtime_memory', env_default: String(process.env.BOT_REPLY_ENABLED || 'false') });
+});
+
+app.post('/api/bot-reply-switch', (req, res) => {
+    const enabled = req.body?.reply_enabled === true || req.body?.enabled === true || String(req.body?.reply_enabled || req.body?.enabled || '').toLowerCase() === 'true';
+    setBotReplyEnabled(enabled);
+    res.json({ success: true, reply_enabled: isBotReplyEnabled(), source: 'runtime_memory' });
 });
 
 app.get('/api/working-settings', async (req, res) => {
