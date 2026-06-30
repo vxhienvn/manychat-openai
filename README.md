@@ -26,3 +26,17 @@ Xin mẫu tủ chậu gương
 - Google Drive folder fallback: `Bathroom/tủ chậu gương`.
 - Nếu Google Sheet chưa có dòng tủ chậu gương, bot vẫn có thể lấy ảnh từ Drive bằng fallback row.
 - Nếu có dòng trong Google Sheet, Sheet vẫn được ưu tiên để lấy khoảng giá và path.
+
+## AIGUKA 4.1.4 Debug API
+
+Các endpoint đọc Supabase trực tiếp, chỉ đọc, không gửi tin nhắn:
+
+- `GET /api/debug/health`
+- `GET /api/debug/latest-conversations?limit=10`
+- `GET /api/debug/conversation/:conversation_id`
+- `GET /api/debug/search-messages?q=0973693677&limit=20`
+
+Khuyến nghị đặt biến môi trường `DEBUG_API_KEY=<mật_khẩu_riêng>` trên Render/Railway. Khi đó gọi API kèm `?key=<mật_khẩu_riêng>` hoặc header `x-debug-key`.
+
+Ví dụ:
+`https://your-domain.com/api/debug/latest-conversations?limit=10&key=YOUR_DEBUG_KEY`

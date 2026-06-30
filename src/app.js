@@ -1044,6 +1044,168 @@ app.get('/supabase-health', async (req, res) => {
 });
 
 
+
+
+// ===== AIGUKA DEBUG API =====
+// Read-only API để ChatGPT/Admin đọc trực tiếp hội thoại từ Supabase, không cần export CSV.
+// Bảo mật: nếu đặt DEBUG_API_KEY trong env thì phải gửi ?key=... hoặc header x-debug-key.
+function aigukaDebugAllowed(req) {
+    const key = String(process.env.DEBUG_API_KEY || '').trim();
+    if (!key) return true; // Không đặt key thì cho phép để tránh làm hỏng deploy cũ. Nên đặt key khi public.
+    const provided = String(req.query.key || req.headers['x-debug-key'] || '').trim();
+    return provided && provided === key;
+}
+
+function requireAigukaDebugAccess(req, res) {
+    if (aigukaDebugAllowed(req)) return true;
+    res.status(401).json({ ok: false, error: 'DEBUG_API_KEY_REQUIRED_OR_INVALID' });
+    return false;
+}
+
+function clampDebugLimit(value, fallback = 10, max = 50) {
+    const n = Number.parseInt(String(value || ''), 10);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.min(n, max);
+}
+
+function compactDebugMessage(row, includeRaw = false) {
+    if (!row) return row;
+    const out = {
+        id: row.id,
+        conversation_id: row.conversation_id,
+        sender_id: row.sender_id,
+        role: row.role,
+        message_type: row.message_type,
+        text: row.text,
+        attachment_url: row.attachment_url,
+        ad_id: row.ad_id,
+        post_id: row.post_id,
+        product_group: row.product_group,
+        intent: row.intent,
+        created_at: row.created_at
+    };
+    if (includeRaw) out.raw = row.raw;
+    return out;
+}
+
+function groupMessagesByConversation(messages) {
+    const map = new Map();
+    for (const m of Array.isArray(messages) ? messages : []) {
+        const key = String(m.conversation_id || '');
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(m);
+    }
+    return map;
+}
+
+async function debugFetchMessagesForConversationIds(ids, includeRaw = false, perConversationLimit = 200) {
+    const cleanIds = (ids || []).map(String).filter(Boolean);
+    if (!cleanIds.length) return [];
+    // Supabase/PostgREST in.(uuid1,uuid2). ids do DB sinh UUID nên không chứa ký tự nguy hiểm.
+    const inList = cleanIds.map(id => id.replace(/[^a-zA-Z0-9_-]/g, '')).join(',');
+    const select = includeRaw ? '*' : 'id,conversation_id,sender_id,role,message_type,text,attachment_url,ad_id,post_id,product_group,intent,created_at';
+    const limit = Math.min(cleanIds.length * perConversationLimit, 2000);
+    return await supabaseRequest(`messages?conversation_id=in.(${inList})&select=${select}&order=created_at.asc&limit=${limit}`, { method: 'GET' });
+}
+
+app.get('/api/debug/health', async (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    res.json({
+        ok: true,
+        name: 'AIGUKA Debug API',
+        version: '4.1.4-debug-api',
+        supabase_ready: supabaseIsReady(),
+        reply_enabled: isBotReplyEnabled(),
+        debug_key_required: Boolean(String(process.env.DEBUG_API_KEY || '').trim()),
+        endpoints: [
+            'GET /api/debug/latest-conversations?limit=10&include_raw=false',
+            'GET /api/debug/conversation/:conversation_id?include_raw=false',
+            'GET /api/debug/search-messages?q=0973693677&limit=20&include_raw=false'
+        ]
+    });
+});
+
+app.get('/api/debug/latest-conversations', async (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    if (!supabaseIsReady()) return res.status(503).json({ ok: false, error: 'SUPABASE_NOT_READY' });
+    try {
+        const limit = clampDebugLimit(req.query.limit, 10, 50);
+        const includeRaw = String(req.query.include_raw || 'false').toLowerCase() === 'true';
+        const conversations = await supabaseRequest(
+            `conversations?select=*&order=last_message_at.desc&limit=${limit}`,
+            { method: 'GET' }
+        );
+        const ids = (conversations || []).map(c => c.id).filter(Boolean);
+        const messages = await debugFetchMessagesForConversationIds(ids, includeRaw, 200);
+        const byConv = groupMessagesByConversation(messages);
+        const data = (conversations || []).map(c => ({
+            conversation: c,
+            message_count: (byConv.get(String(c.id)) || []).length,
+            messages: (byConv.get(String(c.id)) || []).map(m => compactDebugMessage(m, includeRaw))
+        }));
+        res.json({ ok: true, limit, count: data.length, data });
+    } catch (error) {
+        console.error('[DEBUG_API] latest-conversations error:', error.message);
+        res.status(500).json({ ok: false, error: error.message });
+    }
+});
+
+app.get('/api/debug/conversation/:conversationId', async (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    if (!supabaseIsReady()) return res.status(503).json({ ok: false, error: 'SUPABASE_NOT_READY' });
+    try {
+        const conversationId = String(req.params.conversationId || '').trim();
+        const includeRaw = String(req.query.include_raw || 'false').toLowerCase() === 'true';
+        const conversations = await supabaseRequest(
+            `conversations?id=eq.${encodeURIComponent(conversationId)}&select=*&limit=1`,
+            { method: 'GET' }
+        );
+        const messages = await debugFetchMessagesForConversationIds([conversationId], includeRaw, 500);
+        res.json({
+            ok: true,
+            conversation: Array.isArray(conversations) ? conversations[0] || null : null,
+            message_count: Array.isArray(messages) ? messages.length : 0,
+            messages: (messages || []).map(m => compactDebugMessage(m, includeRaw))
+        });
+    } catch (error) {
+        console.error('[DEBUG_API] conversation error:', error.message);
+        res.status(500).json({ ok: false, error: error.message });
+    }
+});
+
+app.get('/api/debug/search-messages', async (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    if (!supabaseIsReady()) return res.status(503).json({ ok: false, error: 'SUPABASE_NOT_READY' });
+    try {
+        const q = String(req.query.q || '').trim();
+        if (!q) return res.status(400).json({ ok: false, error: 'Missing q' });
+        const limit = clampDebugLimit(req.query.limit, 20, 100);
+        const includeRaw = String(req.query.include_raw || 'false').toLowerCase() === 'true';
+        const select = includeRaw ? '*' : 'id,conversation_id,sender_id,role,message_type,text,attachment_url,ad_id,post_id,product_group,intent,created_at';
+        const encoded = encodeURIComponent(`*${q.replace(/[%*]/g, '')}*`);
+        const messages = await supabaseRequest(
+            `messages?text=ilike.${encoded}&select=${select}&order=created_at.desc&limit=${limit}`,
+            { method: 'GET' }
+        );
+        const ids = [...new Set((messages || []).map(m => m.conversation_id).filter(Boolean))];
+        const convIn = ids.map(id => String(id).replace(/[^a-zA-Z0-9_-]/g, '')).join(',');
+        let conversations = [];
+        if (convIn) {
+            conversations = await supabaseRequest(`conversations?id=in.(${convIn})&select=*`, { method: 'GET' });
+        }
+        res.json({
+            ok: true,
+            q,
+            count: Array.isArray(messages) ? messages.length : 0,
+            conversations,
+            messages: (messages || []).map(m => compactDebugMessage(m, includeRaw))
+        });
+    } catch (error) {
+        console.error('[DEBUG_API] search-messages error:', error.message);
+        res.status(500).json({ ok: false, error: error.message });
+    }
+});
+
 app.get('/pending-replies-health', async (req, res) => {
     if (!supabaseIsReady()) {
         return res.status(200).json({ ok: false, enabled: SUPABASE_ENABLED, error: 'Supabase env is missing or disabled' });
