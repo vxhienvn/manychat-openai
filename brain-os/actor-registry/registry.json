@@ -1,12 +1,26 @@
 {
-  "version": "5.4.3",
-  "description": "Actor Identity Registry: chỉ human_admin mới được coi là sale thật. Botcake/Meta auto/AIGUKA/page_unknown không kích hoạt admin takeover.",
-  "human_admin_names": ["Yến Nguyễn", "Nga Dương"],
-  "bot_actor_names": ["Botcake", "Bot Cake", "AIGUKA", "ManyChat", "Meta", "Messenger Automation", "Tự động"],
+  "version": "5.4.4",
+  "description": "Actor Identity + Event Classifier: tách tin nhắn hội thoại thật khỏi activity/system event của Pancake/Meta.",
+  "human_admin_names": [
+    "Yến Nguyễn",
+    "Nga Dương"
+  ],
+  "bot_actor_names": [
+    "Botcake",
+    "Bot Cake",
+    "AIGUKA",
+    "ManyChat",
+    "Meta",
+    "Messenger Automation",
+    "Tự động"
+  ],
   "rules": [
     "human_admin -> khóa bot/admin takeover",
     "botcake/meta_auto/aiguka_bot/page_unknown -> không khóa bot",
     "tin nhắn tự động có mẫu chào/cảm ơn/quan tâm -> auto_or_bot",
-    "pending scanner tìm khách đang chờ, không chỉ nhìn tin cuối cùng"
+    "pending scanner tìm khách đang chờ, không chỉ nhìn tin cuối cùng",
+    "system_event/activity_event -> không khóa bot, không tính là sale đã trả lời",
+    "chỉ tin nhắn hội thoại thật của human_admin mới kích hoạt admin takeover",
+    "các mẫu \"đã trả lời một quảng cáo\", \"đã trả lời bình luận\", \"khách vừa gửi image...\" là system_event"
   ]
 }

@@ -619,9 +619,53 @@ function isLikelyAutoOutboundText(text = '') {
     return false;
 }
 
+// ===== AIGUKA 5.4.4: Event Classifier =====
+// Không đưa activity/system event của Pancake/Meta vào logic human takeover.
+// Ví dụ: "Yến Nguyễn đã trả lời một quảng cáo" chỉ là activity log, không phải tin nhắn sale gửi cho khách.
+function isLikelySystemEventText(text = '') {
+    const h = normalizeVietnameseForMatch(text || '');
+    if (!h) return false;
+    const exactOrStrong = [
+        'da tra loi mot quang cao',
+        'da tra loi 1 quang cao',
+        'da tra loi quang cao',
+        'da tra loi mot binh luan',
+        'da tra loi 1 binh luan',
+        'da phan hoi mot binh luan',
+        'da phan hoi 1 binh luan',
+        'da gan the',
+        'da gan nhan',
+        'da doi trang thai',
+        'da tao don',
+        'da cap nhat don',
+        'da them ghi chu',
+        'da dong bo',
+        'khach vua gui image san pham va can tu van mau nay',
+        'ban dang phan hoi binh luan cua nguoi dung',
+        'binh luan cua nguoi dung ve bai viet tren trang cua minh',
+        'messenger attachment'
+    ];
+    if (exactOrStrong.some(p => h.includes(p))) return true;
+
+    // Mẫu activity của Pancake thường là: "<Tên nhân viên> đã trả lời ..."
+    // Nếu có tên + "đã trả lời" + đối tượng quảng cáo/bình luận thì coi là system_event.
+    if (h.includes(' da tra loi ') && (h.includes('quang cao') || h.includes('binh luan') || h.includes('comment'))) return true;
+
+    // Mẫu thông báo Page/Meta, không phải câu sale nhắn khách.
+    if ((h.startsWith('khach ') || h.includes(' khach ')) && (h.includes('vua gui') || h.includes('can tu van') || h.includes('da gui'))) return true;
+    return false;
+}
+
+function isConversationMessageText(text = '') {
+    return !isLikelySystemEventText(text);
+}
+
 function classifyOutboundActor({ text = '', msg = {}, source = 'unknown', defaultPageUnknownRole = 'page' } = {}) {
     const actorName = extractActorNameFromMessage(msg);
     const actorNameNorm = normalizeActorName(actorName);
+    if (isLikelySystemEventText(text)) {
+        return { role: 'system', actor_type: 'system_event', actor_name: actorName || 'System Event', source: source.includes('pancake') ? 'pancake_system_event' : 'page_system_event', locksSale: false };
+    }
     if (actorName && nameMatchesRegistry(actorName, BOT_ACTOR_NAMES)) {
         const isBotcake = actorNameNorm.includes('botcake') || actorNameNorm.includes('bot cake');
         return { role: 'bot', actor_type: isBotcake ? 'botcake' : 'page_auto', actor_name: actorName, source: isBotcake ? 'pancake_botcake' : source, locksSale: false };
@@ -643,19 +687,27 @@ function classifyOutboundActor({ text = '', msg = {}, source = 'unknown', defaul
 function supabaseRowActorType(row = {}) {
     const raw = row.raw || {};
     const rawActor = raw.actor_type || raw.actor?.type || raw.classified_actor_type || raw.message_actor_type;
-    if (rawActor) return String(rawActor).toLowerCase();
     const source = String(row.source || raw.source || '').toLowerCase();
     const role = String(row.role || '').toLowerCase();
     const text = String(row.text || '');
+
+    // 5.4.4: event text thắng role cũ trong DB. Nhiều activity của Pancake bị lưu role=admin.
+    if (isLikelySystemEventText(text) || source.includes('system_event')) return 'system_event';
+    if (rawActor) {
+        const actor = String(rawActor).toLowerCase();
+        if (actor === 'human_admin' && isLikelySystemEventText(text)) return 'system_event';
+        return actor;
+    }
     if (role === 'customer' || role === 'user') return 'customer';
     if (role === 'bot' || source.includes('bot') || source.includes('auto') || source.includes('aiguka') || isLikelyAutoOutboundText(text)) return 'auto_or_bot';
+    if (role === 'system') return 'system_event';
     if (role === 'page') return 'page_unknown';
     if (role === 'admin' || role === 'sale') return 'human_admin';
     return 'unknown';
 }
 
 function isHumanAdminSupabaseRow(row = {}) {
-    return supabaseRowActorType(row) === 'human_admin';
+    return supabaseRowActorType(row) === 'human_admin' && isConversationMessageText(row.text || '');
 }
 
 function classifyPageOutboundMessage(customerId, text = "", createdAtIso = "", msg = {}) {
@@ -1088,8 +1140,9 @@ function historyLineFromSupabaseMessage(row = {}) {
     const product = row.product_group || row.product_item_key || 'unknown';
     const actorType = supabaseRowActorType(row);
     if (role === 'customer' || role === 'user' || actorType === 'customer') return `Khách: ${text} | TIME:${ms} | PRODUCT:${product}`;
+    if (actorType === 'system_event') return `SystemEvent: ${text} | TIME:${ms} | PRODUCT:${product}`;
     if (actorType === 'human_admin') return `Admin: ${text} | TIME:${ms} | PRODUCT:${product}`;
-    if (role === 'bot' || role === 'assistant' || actorType === 'auto_or_bot') return `Bot: ${text} | TIME:${ms} | PRODUCT:${product}`;
+    if (role === 'bot' || role === 'assistant' || actorType === 'auto_or_bot' || actorType === 'botcake' || actorType === 'pancake_auto' || actorType === 'meta_auto') return `Bot: ${text} | TIME:${ms} | PRODUCT:${product}`;
     if (role === 'page' || actorType === 'page_unknown') return `PageAuto: ${text} | TIME:${ms} | PRODUCT:${product}`;
     return `${role || 'Message'}: ${text} | TIME:${ms} | PRODUCT:${product}`;
 }
@@ -5403,10 +5456,10 @@ async function hasSupabaseAdminAfterLastCustomer(senderId, lastCustomerTimeMs = 
     try {
         const since = new Date(Number(lastCustomerTimeMs)).toISOString();
         const rows = await supabaseRequest(
-            `messages?sender_id=eq.${encodeURIComponent(String(senderId))}&role=in.(admin,page,sale)&created_at=gte.${encodeURIComponent(since)}&select=id,created_at,text,role&order=created_at.desc&limit=1`,
+            `messages?sender_id=eq.${encodeURIComponent(String(senderId))}&role=in.(admin,page,sale,system,bot)&created_at=gte.${encodeURIComponent(since)}&select=id,created_at,text,role,source,raw&order=created_at.desc&limit=20`,
             { method: "GET" }
         );
-        return Array.isArray(rows) && Boolean(rows[0]);
+        return Array.isArray(rows) && rows.some(r => isHumanAdminSupabaseRow(r));
     } catch (error) {
         console.error("hasSupabaseAdminAfterLastCustomer error:", senderId, error.message);
         return false;
