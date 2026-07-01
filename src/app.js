@@ -12,7 +12,8 @@ app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AIGUKA_VERSION = '4.3.0-schema-compat-stable';
+const AIGUKA_VERSION = '5.1.0-modular-production-candidate';
+const moduleRegistry = require('./core-module-registry');
 
 // ===== AIGUKA BOT REPLY MASTER SWITCH =====
 // Default OFF for safety. Set BOT_REPLY_ENABLED=true in env or turn on from Admin UI.
@@ -817,9 +818,16 @@ async function markPendingRepliesForSender(senderId, status, reason = "") {
     }
 }
 
+function isAdminTakeoverPendingReason(reason = "") {
+    const r = String(reason || "").toLowerCase();
+    return r.includes("admin_takeover") || r.includes("customer_during_admin") || r.includes("sale_lock");
+}
+
 async function processPendingReplyRow(row) {
     if (!row || !row.sender_id) return;
     const senderId = String(row.sender_id);
+    const pendingReason = String(row.reason || "");
+    const isTakeoverPending = isAdminTakeoverPendingReason(pendingReason);
 
     try {
         await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
@@ -859,7 +867,11 @@ async function processPendingReplyRow(row) {
             return;
         }
 
-        if (hasAdminReplyAfterLastCustomer(history) || await hasSupabaseAdminAfterLastCustomer(senderId, getLastCustomerTimeFromHistory(history))) {
+        // Với pending tạo do khách nhắn trong lúc sale-lock/admin takeover,
+        // không hủy vĩnh viễn chỉ vì có log admin trong lịch sử/Supabase.
+        // Các log đồng bộ Messenger/Pancake có thể được ghi sau tin khách dù thực tế là tin cũ.
+        // Luật đúng: nếu bot_paused_until còn hạn thì đã được dời lịch ở trên; hết hạn thì bot đọc lại và xử lý.
+        if (!isTakeoverPending && (hasAdminReplyAfterLastCustomer(history) || await hasSupabaseAdminAfterLastCustomer(senderId, getLastCustomerTimeFromHistory(history)))) {
             cancelBotReplyBecauseSaleAnswered(senderId, "sale_answered_before_pending_due");
             await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
                 method: "PATCH",
@@ -868,6 +880,7 @@ async function processPendingReplyRow(row) {
             return;
         }
 
+        console.log('[PENDING_REPLY_EXECUTE]', senderId, row.id, pendingReason || 'no_reason');
         await processAiguka4Workflow(senderId, { recipient: { id: row.page_id || undefined } });
         await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
             method: "PATCH",
@@ -1535,6 +1548,43 @@ async function debugFetchMessagesForConversationIds(ids, includeRaw = false, per
     return await supabaseRequest(`messages?conversation_id=in.(${inList})&select=${select}&order=created_at.asc&limit=${limit}`, { method: 'GET' });
 }
 
+
+app.get('/', (req, res) => res.redirect('/admin-v5'));
+app.get('/admin-v5', (req, res) => res.sendFile(path.join(__dirname, '..', 'public', 'v5-admin.html')));
+app.get('/api/version', (req, res) => res.json({ ok: true, version: AIGUKA_VERSION, build: 'modular-production-candidate', reply_enabled: isBotReplyEnabled(), modules: moduleRegistry.health() }));
+
+app.get('/api/v5/status', (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    const modules = moduleRegistry.health();
+    res.json({
+        ok: true,
+        version: AIGUKA_VERSION,
+        reply_enabled: isBotReplyEnabled(),
+        supabase_ready: supabaseIsReady(),
+        modules,
+        safe_for_live_test: true,
+        notes: [
+            'reply_bot_v5 handles customer care when master reply switch is ON',
+            'legacy_reply_bot is OFF by default to prevent duplicate replies',
+            'slide_engine is OFF by default; enable only after slide mapping is verified',
+            'sale_lock and policy_engine should stay ON in production'
+        ]
+    });
+});
+app.post('/api/v5/test-reply', (req, res) => {
+    try {
+        const message = String(req.body?.message || '').trim();
+        const detectedProduct = toDbProductGroup(detectExplicitTopic(message) || '') || '';
+        const productType = req.body?.productType || detectedProduct || '';
+        const intent = req.body?.intent || detectCustomerIntent(message);
+        const c = detectContactInfo(message);
+        const reply = v5BuildOneShotReply({ productType, intent, message, state: {}, hasContact: Boolean(c.phone || c.zalo_phone) });
+        res.json({ ok: true, version: AIGUKA_VERSION, input: { message, productType, intent, contact: c }, reply });
+    } catch (error) {
+        res.status(500).json({ ok: false, error: error.message });
+    }
+});
+
 app.get('/api/debug/health', async (req, res) => {
     if (!requireAigukaDebugAccess(req, res)) return;
     res.json({
@@ -1545,6 +1595,9 @@ app.get('/api/debug/health', async (req, res) => {
         reply_enabled: isBotReplyEnabled(),
         debug_key_required: Boolean(String(process.env.DEBUG_API_KEY || '').trim()),
         endpoints: [
+            'GET /admin-v5',
+            'GET /api/version',
+            'GET /api/modules',
             'GET /api/debug/latest-conversations?limit=10&include_raw=false',
             'GET /api/debug/conversation/:conversation_id?include_raw=false',
             'GET /api/debug/sender/:sender_id?include_raw=false',
@@ -1553,6 +1606,28 @@ app.get('/api/debug/health', async (req, res) => {
             'POST /api/sync/messenger/sender/:senderId?messages=20'
         ]
     });
+});
+
+
+app.get('/api/modules', (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    res.json({ ok: true, version: AIGUKA_VERSION, modules: moduleRegistry.health() });
+});
+
+app.post('/api/modules/:moduleId', (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    const moduleId = String(req.params.moduleId || '').trim();
+    const enabled = req.body?.enabled === true || String(req.body?.enabled || '').toLowerCase() === 'true';
+    const module = moduleRegistry.setEnabled(moduleId, enabled);
+    res.json({ ok: true, version: AIGUKA_VERSION, module });
+});
+
+app.post('/api/modules/:moduleId/toggle', (req, res) => {
+    if (!requireAigukaDebugAccess(req, res)) return;
+    const moduleId = String(req.params.moduleId || '').trim();
+    const current = moduleRegistry.isEnabled(moduleId, false);
+    const module = moduleRegistry.setEnabled(moduleId, !current);
+    res.json({ ok: true, version: AIGUKA_VERSION, module });
 });
 
 app.get('/api/debug/latest-conversations', async (req, res) => {
@@ -4611,15 +4686,26 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
     saveConversations(conversations);
     saveCustomerStates(customerStates);
 
-    // KHÓA CỨNG: nếu sale/admin đang xử lý, bot chỉ lưu tin khách và tuyệt đối không đặt lịch trả lời.
-    // Bot chỉ được quay lại khi có tin khách mới sau thời gian pause, không tự chen sau 10 phút.
+    // Nếu sale/admin đang xử lý: không trả lời ngay, nhưng PHẢI tạo durable pending.
+    // Sau khi hết bot_paused_until, nếu admin không nhắn tiếp thì worker sẽ đọc lại hội thoại và trả lời.
     if (humanActiveAtCustomerMessage || (state.humanTakeoverUntil && now < Number(state.humanTakeoverUntil))) {
-        console.log("Customer message stored while admin takeover active; no bot timer scheduled:", senderId);
+        const dueAt = Number(state.humanTakeoverUntil || 0) + 1000;
+        console.log("Customer message stored while admin takeover active; durable pending scheduled:", senderId, new Date(dueAt).toISOString());
         state.pendingHumanCustomer = true;
+        state.pendingBotReplyDueAt = dueAt;
         clearCustomerReplyTimer(senderId);
-        markPendingRepliesForSender(senderId, "cancelled", "customer_during_admin_takeover").catch(err => console.error("Cancel pending during takeover error:", err.message));
+        scheduleDurablePendingReply({
+            senderId,
+            pageId: event?.recipient?.id || state.lastPageId || "",
+            dueAtMs: dueAt,
+            reason: "customer_during_admin_takeover"
+        }).then(result => {
+            if (result?.ok) console.log("[PENDING_REPLY_CREATED]", result.action, senderId, result.due_at, "customer_during_admin_takeover");
+        }).catch(err => console.error("Durable pending during takeover error:", err.message));
         saveConversations(conversations);
         saveCustomerStates(customerStates);
+        updateSupabaseCustomerState(senderId, state, { pending_human_customer: true, pending_reply_due_at: new Date(dueAt).toISOString() })
+            .catch(err => console.error("Customer state pending takeover update error:", err.message));
         return;
     }
 
@@ -5022,6 +5108,150 @@ async function handleProductMediaRequest(senderId, customerMessage, currentHisto
     }
 }
 
+
+function moduleOn(id, fallback = false) {
+    try { return moduleRegistry.isEnabled(id, fallback); } catch (_) { return fallback; }
+}
+
+function v5ShortProductName(productType = '') {
+    try { return productLabel(productType); } catch (_) {}
+    const map = { fan: 'quạt trần', faucet: 'sen vòi/thiết bị vệ sinh', combo: 'combo phòng tắm', toilet: 'bồn cầu', kitchen: 'thiết bị bếp', lighting: 'đèn trang trí' };
+    return map[String(productType || '').toLowerCase()] || 'sản phẩm';
+}
+
+function v5BuildOneShotReply({ productType = '', intent = 'general', message = '', state = {}, hasContact = false }) {
+    const productName = v5ShortProductName(productType);
+    const msg = String(message || '').trim();
+
+    if (hasContact) {
+        return 'Dạ em đã nhận thông tin liên hệ của anh/chị rồi ạ. Sale showroom sẽ liên hệ tư vấn chi tiết và gửi mẫu phù hợp cho mình sớm nhất nhé.';
+    }
+
+    if (intent === 'ask_address') {
+        return 'Dạ showroom bên em ở 254 Phố Keo, Gia Lâm, Hà Nội ạ. Anh/chị đang quan tâm sản phẩm nào để em kiểm tra mẫu phù hợp trước khi mình qua xem trực tiếp nhé?';
+    }
+    if (intent === 'ask_hotline') {
+        return 'Dạ hotline showroom là 0973693677 ạ. Anh/chị có thể gọi trực tiếp hoặc để lại SĐT/Zalo, sale bên em tư vấn đúng mẫu mình đang quan tâm nhé.';
+    }
+    if (intent === 'ask_warranty') {
+        return `Dạ chính sách bảo hành tùy dòng ${productName} ạ. Anh/chị cho em biết mẫu hoặc nhu cầu cụ thể, em kiểm tra đúng dòng rồi báo lại cho chính xác nhé.`;
+    }
+    if (intent === 'ask_install') {
+        return `Dạ bên em có hỗ trợ tư vấn lắp đặt cho ${productName} ạ. Anh/chị cho em xin khu vực lắp và mẫu mình quan tâm để sale kiểm tra phương án phù hợp nhé.`;
+    }
+
+    if (!productType) {
+        return 'Dạ anh/chị đang quan tâm nhóm nào ạ: quạt trần, sen vòi/lavabo, bồn cầu, combo phòng tắm, bếp hay đèn trang trí? Em xác nhận đúng sản phẩm rồi tư vấn cho mình nhé.';
+    }
+
+    if (intent === 'ask_price') {
+        return `Dạ ${productName} bên em có nhiều mẫu và mức giá khác nhau tùy kiểu dáng/chất liệu ạ. Anh/chị để lại SĐT/Zalo hoặc cho em biết ngân sách/khu vực lắp, sale sẽ gửi đúng mẫu và báo giá chuẩn cho mình nhé.`;
+    }
+
+    if (intent === 'ask_more_images' || /mẫu|anh|ảnh|hình|catalog|catalogue/i.test(msg)) {
+        return `Dạ em đã xác nhận anh/chị quan tâm ${productName}. Anh/chị để lại SĐT/Zalo, sale bên em gửi album mẫu rõ hơn và tư vấn mẫu phù hợp với nhu cầu của mình nhé.`;
+    }
+
+    return `Dạ em nhận được rồi ạ. Với nhóm ${productName}, anh/chị cho em xin thêm nhu cầu chính hoặc SĐT/Zalo, sale showroom sẽ tư vấn đúng mẫu và báo giá chuẩn cho mình nhé.`;
+}
+
+async function handleV5ModularCustomerCare(senderId, event, customerMessage, now) {
+    if (!moduleOn('reply_bot_v5', true)) return false;
+    if (!isBotReplyEnabled()) return false;
+
+    const state = ensureCustomerState(senderId);
+    const history = conversations[senderId] || [];
+
+    if (moduleOn('messenger_sync', true)) {
+        await syncMessengerBeforeBotSend(senderId);
+    }
+
+    if (moduleOn('sale_lock', true)) {
+        if (state.humanTakeoverUntil && now < Number(state.humanTakeoverUntil)) {
+            // Khách nhắn khi sale-lock còn hạn: KHÔNG trả lời ngay, nhưng phải xếp lịch xử lý sau khi hết khóa.
+            const dueAt = Number(state.humanTakeoverUntil) + 1000;
+            const currentTopic = state.currentTopic || state.productType || state.lockedProduct || 'unknown';
+            const lastLine = String((conversations[senderId] || [])[((conversations[senderId] || []).length - 1)] || '');
+            if (!lastLine.includes(`TIME:${now}`) || !lastLine.startsWith('Khách:')) {
+                if (!Array.isArray(conversations[senderId])) conversations[senderId] = [];
+                conversations[senderId].push(`Khách: ${customerMessage} | TIME:${now} | PRODUCT:${currentTopic} | HUMAN_TAKEOVER_ACTIVE | V5`);
+                conversations[senderId] = conversations[senderId].slice(-120);
+            }
+            state.lastCustomerTime = now;
+            state.pendingHumanCustomer = true;
+            state.pendingBotReplyDueAt = dueAt;
+            clearCustomerReplyTimer(senderId);
+            saveConversations(conversations);
+            saveCustomerStates(customerStates);
+            await scheduleDurablePendingReply({
+                senderId,
+                pageId: event?.recipient?.id || state.lastPageId || '',
+                dueAtMs: dueAt,
+                reason: 'customer_during_admin_takeover_v5'
+            }).then(result => {
+                if (result?.ok) console.log('[PENDING_REPLY_CREATED]', result.action, senderId, result.due_at, 'customer_during_admin_takeover_v5');
+                return result;
+            });
+            updateSupabaseCustomerState(senderId, state, { pending_human_customer: true, pending_reply_due_at: new Date(dueAt).toISOString() })
+                .catch(err => console.error('Customer state pending V5 update error:', err.message));
+            console.log('[V5_REPLY] sale lock active; pending reply scheduled', senderId, new Date(dueAt).toISOString());
+            return true;
+        }
+        if (hasAdminReplyAfterLastCustomer(history) || await hasSupabaseAdminAfterLastCustomer(senderId, getLastCustomerTimeFromHistory(history))) {
+            console.log('[V5_REPLY] skipped: sale/admin already replied', senderId);
+            cancelBotReplyBecauseSaleAnswered(senderId, 'v5_sale_lock_guard');
+            return true;
+        }
+    }
+
+    const contact = moduleOn('phone_detector', true) ? detectContactInfo(customerMessage, event?.message?.attachments || []) : { phone: '', zalo_phone: '' };
+    const hasContactNow = Boolean(contact.phone || contact.zalo_phone || hasPhoneOrContact(customerMessage));
+    if (hasContactNow) {
+        state.hasContact = true;
+        state.stage = 'HUMAN_HANDOVER';
+    }
+
+    const historyText = history.slice(-30).join(' ');
+    let productType = '';
+    if (moduleOn('product_detect', true)) {
+        productType = resolveWorkflowProduct(state, customerMessage, historyText, event) || groupFromNumericChoice(customerMessage) || state.currentTopic || state.productType || state.lockedProduct || '';
+        const explicitItem = detectProductItemFromText(customerMessage, productType || '');
+        if (explicitItem) productType = explicitItem.product_group || productType;
+        if (productType) {
+            lockProductForConversation(state, productType, detectExplicitTopic(customerMessage) ? 'v5_customer_explicit' : 'v5_context');
+        }
+    }
+
+    const intent = detectCustomerIntent(customerMessage);
+
+    if (moduleOn('policy_engine', true)) {
+        const recentBotAt = Number(state.lastBotReplyTime || 0);
+        if (recentBotAt && Date.now() - recentBotAt < 30 * 1000) {
+            console.log('[V5_REPLY] skipped: rate limit', senderId);
+            return true;
+        }
+        if (state.lastHandledCustomerMessageId && state.lastHandledCustomerMessageId === (event?.message?.mid || '')) {
+            console.log('[V5_REPLY] skipped: already handled message id', senderId);
+            return true;
+        }
+    }
+
+    let reply = v5BuildOneShotReply({ productType, intent, message: customerMessage, state, hasContact: hasContactNow });
+    reply = guardReplyBeforeSend(reply, { productType, message: customerMessage, state, history, allowPhoneAsk: !state.hasContact });
+
+    const sent = await sendMessage(senderId, reply);
+    if (sent === false) return true;
+
+    state.stage = state.hasContact ? 'HUMAN_HANDOVER' : 'GET_PHONE';
+    state.lastHandledCustomerMessageId = event?.message?.mid || '';
+    state.lastIntent = intent;
+    saveCustomerStates(customerStates);
+    conversations[senderId].push(`Bot: ${reply} | TIME:${Date.now()} | PRODUCT:${productType || 'unknown'} | V5_MODULAR_REPLY`);
+    conversations[senderId] = conversations[senderId].slice(-120);
+    saveConversations(conversations);
+    return true;
+}
+
 async function handleMessage(event) {
     // Log postback/quick button clicks too. Trước đây nhánh này return sớm nên mất message.
     if (!event.message && event.postback) {
@@ -5096,8 +5326,20 @@ async function handleMessage(event) {
     recordInternalMessageEvent({ event, senderId, pageId, direction: "customer", text: customerMessage, state });
     await logMessageToSupabase({ event, senderId, pageId, role: "customer", text: customerMessage, messageType: "text", productGroup: state.currentTopic || state.productType || "", source: "meta_customer_message" });
 
-    // AIGUKA 4.0: chuyển toàn bộ khách hàng qua Workflow Engine mới.
-    // Code quyết định: chờ admin 10p/5p, khóa sản phẩm, gửi welcome carousel, chống lặp flow.
+    // AIGUKA V5 Modular Core: module CSKH mới chạy trước legacy workflow.
+    // Mục tiêu: 1 tin khách -> tối đa 1 phản hồi; không slide tự động; sale-lock là luật cứng.
+    if (moduleOn('reply_bot_v5', true)) {
+        const handledByV5 = await handleV5ModularCustomerCare(senderId, event, customerMessage, now);
+        if (handledByV5) return;
+    }
+
+    // Legacy 4.x workflow được tách thành module riêng và mặc định OFF để tránh lặp/chen sale.
+    if (!moduleOn('legacy_reply_bot', false)) {
+        console.log('[MODULE] legacy_reply_bot disabled; message logged only:', senderId);
+        return;
+    }
+
+    // AIGUKA 4.x legacy workflow.
     registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMessage, now);
     return;
 
@@ -6210,6 +6452,10 @@ app.get('/api/sync/messenger/sender/:senderId', async (req, res) => {
 });
 
 app.get('/api/bot-reply-switch', (req, res) => {
+    if (typeof req.query.enabled !== 'undefined' || typeof req.query.reply_enabled !== 'undefined') {
+        const v = req.query.enabled ?? req.query.reply_enabled;
+        setBotReplyEnabled(String(v).toLowerCase() === 'true' || String(v) === '1' || String(v).toLowerCase() === 'on');
+    }
     res.json({ success: true, reply_enabled: isBotReplyEnabled(), source: 'runtime_memory', env_default: String(process.env.BOT_REPLY_ENABLED || 'false') });
 });
 
@@ -6985,13 +7231,38 @@ function dashboardFilterReport(report, req, mode = "all") {
     return { title, report: filtered, productName, dateRange };
 }
 
+function dashboardItemHasZalo(item = {}) {
+    return Boolean(item.has_zalo || (Array.isArray(item.tags) && item.tags.includes("Zalo")) || detectZaloFromText(item.snippet || item.text || ""));
+}
+
+function dashboardItemHasContact(item = {}) {
+    const phones = Array.isArray(item.phones) ? item.phones : [];
+    return Boolean(item.has_phone || phones.length || dashboardItemHasZalo(item));
+}
+
+function dashboardFormatContactCell(item = {}) {
+    const phones = Array.isArray(item.phones) ? item.phones.filter(Boolean) : [];
+    if (phones.length) return phones.join(", ");
+    if (dashboardItemHasZalo(item)) return "Zalo/QR hoặc đã tag Zalo";
+    return "Có liên hệ nhưng chưa đọc được";
+}
+
+function dashboardFormatPhoneOnlyCell(item = {}) {
+    const phones = Array.isArray(item.phones) ? item.phones.filter(Boolean) : [];
+    return phones.length ? phones.join(", ") : "--";
+}
+
+function dashboardFormatZaloTagCell(item = {}) {
+    return dashboardItemHasZalo(item) ? "Có Zalo/tag/QR" : "--";
+}
+
 function dashboardBuildStats(report) {
     const total = report.length;
-    const hasPhone = report.filter(x => x.has_phone).length;
-    const noPhone = report.filter(x => !x.has_phone).length;
-    const hotNoPhone = report.filter(x => x.hot_lead && !x.has_phone);
+    const hasPhone = report.filter(x => dashboardItemHasContact(x)).length;
+    const noPhone = report.filter(x => !dashboardItemHasContact(x)).length;
+    const hotNoPhone = report.filter(x => x.hot_lead && !dashboardItemHasContact(x));
     const called = report.filter(x => x.tags.includes("Đã Gọi")).length;
-    const zalo = report.filter(x => x.tags.includes("Zalo")).length;
+    const zalo = report.filter(x => dashboardItemHasZalo(x)).length;
     const phoneRate = total ? ((hasPhone / total) * 100).toFixed(1) : "0.0";
     const productCount = {
         quat: report.filter(x => x.product === "Quạt").length,
@@ -7752,10 +8023,10 @@ function dashboardBuildAdStats(report, metaData, supplementalReport = [], dataSo
         const row = map[adId];
         if (!row) continue;
         if (dataSource === "pancake") row.total++;
-        if (item.has_phone) row.hasPhone++;
-        if ((item.tags || []).includes("Zalo") || item.has_zalo) row.zalo++;
+        if (dashboardItemHasContact(item)) row.hasPhone++;
+        if (dashboardItemHasZalo(item)) row.zalo++;
         if ((item.tags || []).includes("Đã Gọi")) row.called++;
-        if (item.hot_lead && !item.has_phone) row.hotNoPhone++;
+        if (item.hot_lead && !dashboardItemHasContact(item)) row.hotNoPhone++;
         const product = item.product || "Khác";
         row.productCount[product] = (row.productCount[product] || 0) + 1;
         dashboardAddCounts(row.tagCount, item.tags || []);
@@ -7784,8 +8055,39 @@ function dashboardBuildAdStats(report, metaData, supplementalReport = [], dataSo
 
 function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, pancakeMeta, metaData, metaDaily = null, dateRange, dataSource = "meta", compareStats = null, pancakeReport = [] }) {
     const currentDataSource = String(dataSource || req.query.data_source || "meta");
-    const stats = dashboardBuildStats(report);
-    const adsStats = dashboardBuildAdStats(report, metaData, currentDataSource === "pancake" ? [] : pancakeReport, currentDataSource);
+    const currentAccountFilter = String(req.query.account || req.query.ad_account || "all");
+    const rawAdsStats = dashboardBuildAdStats(report, metaData, currentDataSource === "pancake" ? [] : pancakeReport, currentDataSource);
+
+
+    function dashboardAccountKeyFromRow(row = {}) {
+        return dashboardNormalizeActId(row.accountId || row.account_id || row.ad_account_id || "") || String(row.accountLabel || row.accountName || row.ad_account_name || "").trim();
+    }
+
+    function dashboardCustomerMatchedAd(x = {}) {
+        const adIds = Array.isArray(x.ad_ids) ? x.ad_ids.map(String).filter(Boolean) : [];
+        return adIds.map(id => adInfoByAdId[id]).find(Boolean) || null;
+    }
+
+    function dashboardCustomerAccountKey(x = {}) {
+        const explicit = dashboardNormalizeActId(x.ad_account_id || x.account_id || "") || String(x.ad_account_name || x.adAccountName || x.accountLabel || "").trim();
+        if (explicit) return explicit;
+        const matched = dashboardCustomerMatchedAd(x);
+        return matched ? dashboardAccountKeyFromRow(matched) : "";
+    }
+
+    function dashboardRowMatchesAccount(x = {}) {
+        if (!currentAccountFilter || currentAccountFilter === "all") return true;
+        const wanted = dashboardNormalizeActId(currentAccountFilter) || currentAccountFilter;
+        return dashboardCustomerAccountKey(x) === wanted;
+    }
+
+    const adsStats = rawAdsStats.filter(x => {
+        if (!currentAccountFilter || currentAccountFilter === "all") return true;
+        const wanted = dashboardNormalizeActId(currentAccountFilter) || currentAccountFilter;
+        return dashboardAccountKeyFromRow(x) === wanted;
+    });
+    const displayReport = (report || []).filter(dashboardRowMatchesAccount);
+    const stats = dashboardBuildStats(displayReport);
     const currentLimit = String(limit || 500);
     const currentProduct = dashboardProductParamFromName(dashboardNormalizeProduct(req.query.product || "all"));
     const currentView = dashboardGetViewValue(req, mode);
@@ -7844,6 +8146,46 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         return `<b>${dashboardEscapeHtml(adName)}</b>${accountText ? `<br><span>${dashboardEscapeHtml(accountText)}</span>` : ""}${idText ? `<br><span>${dashboardEscapeHtml(idText)}</span>` : ""}`;
     }
 
+    function dashboardCustomerAccountCell(x = {}) {
+        const explicit = x.ad_account_name || x.adAccountName || x.accountLabel || x.ad_account_id || x.account_id || "";
+        const matched = dashboardCustomerMatchedAd(x);
+        const label = explicit || matched?.accountLabel || matched?.accountName || matched?.accountId || "Không rõ tài khoản";
+        return dashboardEscapeHtml(label);
+    }
+
+    function dashboardCustomerAdNameCell(x = {}) {
+        const adIds = Array.isArray(x.ad_ids) ? x.ad_ids.map(String).filter(Boolean) : [];
+        const matched = dashboardCustomerMatchedAd(x);
+        const name = x.ad_name || x.adName || x.latest_ad_name || matched?.name || (adIds[0] ? `QC ${adIds[0]}` : "Không rõ QC");
+        const idText = adIds[0] || matched?.adId || "";
+        return `<b>${dashboardEscapeHtml(name)}</b>${idText ? `<br><span>${dashboardEscapeHtml(idText)}</span>` : ""}`;
+    }
+
+    const accountMap = new Map();
+    for (const acc of metaData?.accounts || []) {
+        const key = dashboardNormalizeActId(acc.id || acc.accountId || "") || String(acc.name || "").trim();
+        if (key) accountMap.set(key, dashboardAccountLabel(acc));
+    }
+    for (const ad of rawAdsStats) {
+        const key = dashboardAccountKeyFromRow(ad);
+        if (key && !accountMap.has(key)) accountMap.set(key, ad.accountLabel || ad.accountName || ad.accountId || key);
+    }
+    const accountOptions = Array.from(accountMap.entries())
+        .sort((a, b) => String(a[1]).localeCompare(String(b[1]), "vi"))
+        .map(([key, label]) => `<option value="${dashboardEscapeHtml(key)}" ${dashboardSelected(key, currentAccountFilter)}>${dashboardEscapeHtml(label)}</option>`)
+        .join("");
+
+    const topMenu = `<div class="top-menu">
+        <a href="/dashboard-today?time_basis=${currentTimeBasis}&data_source=${currentDataSource}">📊 Dashboard</a>
+        <a href="/dashboard-meta-month?limit=${currentLimit}">📅 Báo cáo tháng</a>
+        <a href="/ad-mapping-admin">⚙️ Quản trị / mapping / lịch bot</a>
+        <a href="/api/debug/health">🩺 Debug health</a>
+        <a href="/api/sync/messenger?limit=5&messages=20">🔄 Sync Messenger</a>
+        <a href="/pancake-review">👥 Khách Pancake</a>
+        <a href="/api/bot-reply-switch?enabled=false">⛔ Tắt bot</a>
+        <a href="/api/bot-reply-switch?enabled=true">✅ Bật bot</a>
+    </div>`;
+
     const adsRows = adsStats.map((x, index) => `
         <tr class="${dashboardAdRowClass(x)}">
             <td>${index + 1}</td>
@@ -7880,18 +8222,20 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         </tr>
     `).join("");
 
-    const phoneRows = report.filter(x => x.has_phone).slice(0, 50).map((x, index) => `
+    const phoneRows = displayReport.filter(x => dashboardItemHasContact(x)).slice(0, 50).map((x, index) => `
         <tr class="row-phone">
             <td>${index + 1}</td>
             <td><b>${dashboardEscapeHtml(x.name)}</b></td>
-            <td>${dashboardCustomerAdCell(x)}</td>
-            <td><b>${dashboardEscapeHtml(x.phones.join(", ") || "Có số nhưng chưa đọc được số")}</b></td>
+            <td>${dashboardCustomerAccountCell(x)}</td>
+            <td>${dashboardCustomerAdNameCell(x)}</td>
+            <td><b>${dashboardEscapeHtml(dashboardFormatPhoneOnlyCell(x))}</b></td>
+            <td>${dashboardEscapeHtml(dashboardFormatZaloTagCell(x))}</td>
             <td>${dashboardEscapeHtml(x.product)}</td>
             <td>${dashboardEscapeHtml(dashboardFormatTags(x.tags))}</td>
         </tr>
     `).join("");
 
-    const noPhoneRows = report.filter(x => !x.has_phone).slice(0, 50).map((x, index) => `
+    const noPhoneRows = displayReport.filter(x => !dashboardItemHasContact(x)).slice(0, 50).map((x, index) => `
         <tr class="row-normal">
             <td>${index + 1}</td>
             <td><b>${dashboardEscapeHtml(x.name)}</b><br><span>${dashboardEscapeHtml(x.conversation_id)}</span></td>
@@ -7908,7 +8252,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AIGUKA Dashboard 3.9.2</title>
+    <title>AIGUKA Dashboard 4.3.1</title>
     <style>
         body { margin:0; font-family:"Times New Roman", Times, serif; font-size:14px; background:#f8fafc; color:#111827; }
         .wrap { max-width:1480px; margin:0 auto; padding:18px; }
@@ -7948,7 +8292,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
 <div class="wrap">
     <div class="header">
         <div>
-            <h1>🤖 AIGUKA AI SALES DASHBOARD 3.9.2</h1>
+            <h1>🤖 AIGUKA AI SALES DASHBOARD 4.3.1</h1>
             <p>${dashboardEscapeHtml(title)} | Nguồn ${dashboardEscapeHtml(currentDataSource)} | Nội bộ/Pancake đã lấy ${fullTotal}/${limit} hội thoại | Meta Direct hiển thị ${totalAdConversations} hội thoại | Cập nhật: ${new Date().toLocaleString('vi-VN', { timeZone: 'Asia/Ho_Chi_Minh' })}</p>
             <p>Pancake: ${dashboardEscapeHtml(pancakeTime)} ${pancakeMeta?.fromCache ? "(cache)" : "(mới)"} | Meta: ${dashboardEscapeHtml(metaTime)} ${metaData?.fromCache ? "(cache)" : "(mới)"} | Bộ lọc: ${dashboardEscapeHtml(dashboardTimeBasisLabel(currentTimeBasis))} | Khoảng: ${dashboardEscapeHtml(dateRange.label)}</p>
         </div>
@@ -7962,6 +8306,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
             <a href="/pancake-report-text?limit=${currentLimit}">Bản text</a>
         </div>
     </div>
+    ${topMenu}
 
     <div class="filters">
         <div class="filter" id="pancakeLimitFilter" style="${currentDataSource === "meta" ? "display:none" : ""}"><label>Giới hạn hội thoại Pancake</label><select id="limitSelect" onchange="applyDashboardFilters()"><option ${dashboardSelected(100,currentLimit)} value="100">100</option><option ${dashboardSelected(300,currentLimit)} value="300">300</option><option ${dashboardSelected(500,currentLimit)} value="500">500</option></select></div>
@@ -7970,6 +8315,7 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
         <div class="filter"><label>Khoảng xem</label><select id="viewSelect" onchange="applyDashboardFilters()"><option value="today" ${dashboardSelected("today",currentView)}>Hôm nay</option><option value="yesterday" ${dashboardSelected("yesterday",currentView)}>Hôm qua</option><option value="last_7d" ${dashboardSelected("last_7d",currentView)}>7 ngày</option><option value="last_30d" ${dashboardSelected("last_30d",currentView)}>30 ngày</option><option value="date" ${dashboardSelected("date",currentView)}>Ngày cụ thể</option><option value="hot" ${dashboardSelected("hot",currentView)}>Khách nóng</option></select></div>
         <div class="filter"><label>Ngày cụ thể</label><input id="dateInput" type="date" value="${dashboardEscapeHtml(currentDate)}" onchange="document.getElementById('viewSelect').value='date'; applyDashboardFilters();" /></div>
         <div class="filter"><label>Sản phẩm</label><select id="productSelect" onchange="applyDashboardFilters()"><option value="all" ${dashboardSelected("all",currentProduct)}>Tất cả</option><option value="quat" ${dashboardSelected("quat",currentProduct)}>Quạt</option><option value="thiet_bi_ve_sinh" ${dashboardSelected("thiet_bi_ve_sinh",currentProduct)}>Thiết bị vệ sinh</option><option value="combo" ${dashboardSelected("combo",currentProduct)}>Combo phòng tắm</option><option value="bep" ${dashboardSelected("bep",currentProduct)}>Bếp</option><option value="bon_tam" ${dashboardSelected("bon_tam",currentProduct)}>Bồn tắm</option><option value="khac" ${dashboardSelected("khac",currentProduct)}>Khác</option></select></div>
+        <div class="filter"><label>Tài khoản quảng cáo</label><select id="accountSelect" onchange="applyDashboardFilters()"><option value="all" ${dashboardSelected("all",currentAccountFilter)}>Tất cả tài khoản</option>${accountOptions}</select></div>
         <div class="filter"><label>Thao tác</label><select onchange="if(this.value) window.location.href=this.value"><option value="">Mở nhanh...</option><option value="/dashboard-today?time_basis=${currentTimeBasis}&limit=${currentLimit}">Hôm nay</option><option value="/dashboard-yesterday?time_basis=${currentTimeBasis}&limit=${currentLimit}">Hôm qua</option><option value="/dashboard?preset=last_7d&time_basis=${currentTimeBasis}&limit=${currentLimit}">7 ngày</option><option value="/dashboard?preset=last_30d&time_basis=${currentTimeBasis}&limit=${currentLimit}">30 ngày</option><option value="/dashboard-meta-month?limit=${currentLimit}">Báo cáo tháng Meta</option><option value="/pancake-report-text?limit=${currentLimit}">Bản text</option></select></div>
     </div>
 
@@ -7991,18 +8337,18 @@ function dashboardRenderHtml({ title, limit, fullTotal, report, req, mode, panca
     <div class="section" id="ads">
         <div class="section-head">
             <h2>📊 Hiệu quả theo quảng cáo</h2>
-            <div class="section-actions"><button class="toggle-btn" onclick="toggleAdsTable()">Ẩn/Hiện ▼</button><span>Tổng chi tiêu: ${dashboardMoney(totalSpend)}</span></div>
+            <div class="section-actions"><label style="font-size:13px">Lọc TK QC: <select id="adsAccountSelect" onchange="syncAdsAccountFilter(this.value)" style="padding:6px 10px;border-radius:8px;border:1px solid #93c5fd"><option value="all" ${dashboardSelected("all",currentAccountFilter)}>Tất cả tài khoản</option>${accountOptions}</select></label><button class="toggle-btn" onclick="toggleAdsTable()">Ẩn/Hiện ▼</button><span>Tổng chi tiêu: ${dashboardMoney(totalSpend)}</span></div>
         </div>
-        <div class="notice">Bảng này chỉ hiển thị các quảng cáo có chi tiêu &gt; 0 trong đúng khoảng thời gian đã chọn. Các mã quảng cáo từ Pancake nhưng không tiêu tiền trong khoảng này sẽ không hiển thị để báo cáo khớp Ads Manager.</div>
+        <div class="notice">Bảng này chỉ hiển thị các quảng cáo có chi tiêu &gt; 0 trong đúng khoảng thời gian đã chọn. Có thể lọc nhanh theo tài khoản quảng cáo ngay tại đầu bảng. Các mã quảng cáo từ Pancake nhưng không tiêu tiền trong khoảng này sẽ không hiển thị để báo cáo khớp Ads Manager.</div>
         <div class="advanced-box" id="advancedBox"><b>📈 Chỉ số nâng cao:</b><label><input type="checkbox" data-col="adv-cpcv" onchange="toggleAdvancedColumns()"> Cost/Hội thoại</label><label><input type="checkbox" data-col="adv-cpps" onchange="toggleAdvancedColumns()"> Cost/SĐT</label><label><input type="checkbox" data-col="adv-cpc" onchange="toggleAdvancedColumns()"> CPC</label><label><input type="checkbox" data-col="adv-cpm" onchange="toggleAdvancedColumns()"> CPM</label><label><input type="checkbox" data-col="adv-ctr" onchange="toggleAdvancedColumns()"> CTR</label></div>
         <button class="toggle-btn" onclick="toggleAdvancedBox()">📈 Chỉ số nâng cao ▶</button>
         <div class="legend"><span class="chip good">Xanh: tỷ lệ SĐT ≥35%</span><span class="chip mid">Vàng: 20%-34.9%</span><span class="chip low">Hồng: dưới 20%</span></div>
-        <div class="table-wrap" id="adsTableWrap"><table><thead><tr><th>#</th><th>Quảng cáo</th><th>Tài khoản QC</th><th>Trạng thái</th><th>Chi tiêu</th><th>Hội thoại</th><th>Có SĐT</th><th>Chưa SĐT</th><th>Zalo</th><th>Đã gọi</th><th>Khách nóng</th><th>Nhân viên</th><th>Tags</th><th>Sản phẩm</th><th class="adv adv-cpcv">Cost/Hội thoại</th><th class="adv adv-cpps">Cost/SĐT</th><th class="adv adv-cpc">CPC</th><th class="adv adv-cpm">CPM</th><th class="adv adv-ctr">CTR</th></tr></thead><tbody>${adsRows || `<tr><td colspan="19">Không có quảng cáo nào tiêu tiền trong khoảng này hoặc Meta API chưa trả dữ liệu.</td></tr>`}</tbody></table></div>
+        <div class="table-wrap" id="adsTableWrap"><table><thead><tr><th>#</th><th>Quảng cáo</th><th>Tài khoản QC</th><th>Trạng thái</th><th>Chi tiêu</th><th>Hội thoại</th><th>Có SĐT/ZL</th><th>Chưa SĐT/ZL</th><th>Zalo riêng/QR</th><th>Đã gọi</th><th>Khách nóng</th><th>Nhân viên</th><th>Tags</th><th>Sản phẩm</th><th class="adv adv-cpcv">Cost/Hội thoại</th><th class="adv adv-cpps">Cost/SĐT</th><th class="adv adv-cpc">CPC</th><th class="adv adv-cpm">CPM</th><th class="adv adv-ctr">CTR</th></tr></thead><tbody>${adsRows || `<tr><td colspan="19">Không có quảng cáo nào tiêu tiền trong khoảng này hoặc Meta API chưa trả dữ liệu.</td></tr>`}</tbody></table></div>
     </div>
 
     <div class="section"><h2>Phân loại sản phẩm</h2><div class="products"><div class="product">Quạt <b>${stats.productCount.quat}</b></div><div class="product">Thiết bị vệ sinh <b>${stats.productCount.thietBiVeSinh}</b></div><div class="product">Combo phòng tắm <b>${stats.productCount.comboPhongTam}</b></div><div class="product">Bếp <b>${stats.productCount.bep}</b></div><div class="product">Bồn tắm <b>${stats.productCount.bonTam}</b></div><div class="product">Khác <b>${stats.productCount.khac}</b></div></div></div>
     <div class="section"><h2>🔥 Khách nóng chưa có số</h2><div class="table-wrap"><table><thead><tr><th>#</th><th>Khách</th><th>Quảng cáo</th><th>Sản phẩm</th><th>Tags</th><th>Cập nhật</th><th>Nội dung gần nhất</th></tr></thead><tbody>${hotRows || `<tr><td colspan="7">Không có</td></tr>`}</tbody></table></div></div>
-    <div class="section"><h2>📞 Khách đã có số</h2><div class="table-wrap"><table><thead><tr><th>#</th><th>Khách</th><th>Quảng cáo</th><th>Số điện thoại</th><th>Sản phẩm</th><th>Tags</th></tr></thead><tbody>${phoneRows || `<tr><td colspan="6">Không có</td></tr>`}</tbody></table></div></div>
+    <div class="section"><h2>📞 Khách đã có SĐT / Zalo</h2><div class="table-wrap"><table><thead><tr><th>#</th><th>Khách</th><th>Tài khoản QC</th><th>Tên quảng cáo</th><th>SĐT/Zalo số</th><th>Zalo tag/QR</th><th>Sản phẩm</th><th>Tags</th></tr></thead><tbody>${phoneRows || `<tr><td colspan="8">Không có</td></tr>`}</tbody></table></div></div>
     <div class="section"><h2>🕒 Khách chưa có số gần nhất</h2><div class="table-wrap"><table><thead><tr><th>#</th><th>Khách</th><th>Quảng cáo</th><th>Sản phẩm</th><th>Tags</th><th>Cập nhật</th><th>Nội dung gần nhất</th></tr></thead><tbody>${noPhoneRows || `<tr><td colspan="7">Không có</td></tr>`}</tbody></table></div></div>
 </div>
 <script>
@@ -8011,7 +8357,8 @@ function toggleAdvancedBox(){ const el=document.getElementById('advancedBox'); i
 function toggleAdvancedColumns(){ document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ const show=cb.checked; document.querySelectorAll('.'+cb.dataset.col).forEach(el=>{ el.style.display=show?'table-cell':'none'; }); localStorage.setItem('aiguka_'+cb.dataset.col,show?'1':'0'); }); }
 function restoreDashboardState(){ const ads=document.getElementById('adsTableWrap'); if(ads && localStorage.getItem('aiguka_ads_table')) ads.style.display=localStorage.getItem('aiguka_ads_table'); const box=document.getElementById('advancedBox'); if(box && localStorage.getItem('aiguka_adv_box')) box.style.display=localStorage.getItem('aiguka_adv_box'); document.querySelectorAll('#advancedBox input[type=checkbox]').forEach(cb=>{ cb.checked=localStorage.getItem('aiguka_'+cb.dataset.col)==='1'; }); toggleAdvancedColumns(); }
 function togglePancakeLimitFilter(){ const source=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; const box=document.getElementById('pancakeLimitFilter'); if(box) box.style.display=(source==='meta')?'none':''; }
-function applyDashboardFilters(){ const limitEl=document.getElementById('limitSelect'); const limit=limitEl?limitEl.value:'500'; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const date=document.getElementById('dateInput').value; const timeBasis=document.getElementById('timeBasisSelect')?document.getElementById('timeBasisSelect').value:'pancake'; const dataSource=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; let path='/dashboard'; const params=new URLSearchParams(); if(dataSource!=='meta') params.set('limit',limit); params.set('time_basis',timeBasis); params.set('data_source',dataSource); if(product && product!=='all') params.set('product',product); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
+function syncAdsAccountFilter(value){ const global=document.getElementById('accountSelect'); if(global) global.value=value||'all'; applyDashboardFilters(); }
+function applyDashboardFilters(){ const limitEl=document.getElementById('limitSelect'); const limit=limitEl?limitEl.value:'500'; const view=document.getElementById('viewSelect').value; const product=document.getElementById('productSelect').value; const account=document.getElementById('accountSelect')?document.getElementById('accountSelect').value:'all'; const date=document.getElementById('dateInput').value; const timeBasis=document.getElementById('timeBasisSelect')?document.getElementById('timeBasisSelect').value:'pancake'; const dataSource=document.getElementById('dataSourceSelect')?document.getElementById('dataSourceSelect').value:'meta'; let path='/dashboard'; const params=new URLSearchParams(); if(dataSource!=='meta') params.set('limit',limit); params.set('time_basis',timeBasis); params.set('data_source',dataSource); if(product && product!=='all') params.set('product',product); if(account && account!=='all') params.set('account',account); if(view==='today'){path='/dashboard-today';} else if(view==='yesterday'){path='/dashboard-yesterday';} else if(view==='hot'){path='/dashboard-hot';} else if(view==='last_7d'){params.set('preset','last_7d');} else if(view==='last_30d'){params.set('preset','last_30d');} else if(view==='date'){if(date) params.set('date',date);} window.location.href=path+'?'+params.toString(); }
 restoreDashboardState();
 togglePancakeLimitFilter();
 </script>

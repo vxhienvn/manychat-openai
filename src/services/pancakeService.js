@@ -14,6 +14,32 @@ function pancakeCleanHtml(html = "") {
         .trim();
 }
 
+
+function pancakeNormalizeVietnamesePhone(raw) {
+    const text = String(raw || "");
+    let digits = text.replace(/[^0-9+]/g, "");
+    if (digits.startsWith("+84")) digits = "0" + digits.slice(3);
+    digits = digits.replace(/[^0-9]/g, "");
+    if (digits.length > 10 && digits.startsWith("84")) digits = "0" + digits.slice(2);
+    return digits;
+}
+
+function pancakeExtractPhonesFromText(text = "") {
+    const src = String(text || "");
+    const matches = src.match(/(?:\+84|0)[0-9\s.\-]{8,13}/g) || [];
+    const phones = [];
+    for (const m of matches) {
+        const n = pancakeNormalizeVietnamesePhone(m);
+        if (/^0[0-9]{9}$/.test(n) && !phones.includes(n)) phones.push(n);
+    }
+    return phones;
+}
+
+function pancakeDetectZaloFromText(text = "") {
+    const t = String(text || "").toLowerCase();
+    return /zalo|za\s*lo|zalo qr|qr zalo|quét zalo|quet zalo|kết bạn zalo|ket ban zalo/.test(t);
+}
+
 function pancakeGetTagNames(conv) {
     if (!Array.isArray(conv.tags)) return [];
     return conv.tags
@@ -23,11 +49,28 @@ function pancakeGetTagNames(conv) {
 }
 
 function pancakeGetPhones(conv) {
-    if (!Array.isArray(conv.recent_phone_numbers)) return [];
+    const phones = [];
+    const add = (value) => {
+        const normalized = pancakeNormalizeVietnamesePhone(value);
+        if (/^0[0-9]{9}$/.test(normalized) && !phones.includes(normalized)) phones.push(normalized);
+    };
 
-    return conv.recent_phone_numbers
-        .map(item => item.phone_number || item.captured)
-        .filter(Boolean);
+    if (Array.isArray(conv.recent_phone_numbers)) {
+        for (const item of conv.recent_phone_numbers) add(item?.phone_number || item?.captured || item);
+    }
+
+    // Pancake đôi khi chưa đẩy recent_phone_numbers nhưng số có trong snippet/tag/note.
+    const textSources = [
+        conv.snippet,
+        conv.last_message,
+        conv.message,
+        ...(Array.isArray(conv.tags) ? conv.tags.map(t => t?.text || t?.name || "") : [])
+    ];
+    for (const text of textSources) {
+        for (const phone of pancakeExtractPhonesFromText(text)) add(phone);
+    }
+
+    return phones;
 }
 
 function pancakeClassifyProduct(text = "") {
@@ -116,6 +159,8 @@ function pancakeBuildCustomerRow(conv) {
     const tags = pancakeGetTagNames(conv);
     const phones = pancakeGetPhones(conv);
     const snippet = pancakeCleanHtml(conv.snippet || "");
+    const tagText = tags.join(" ");
+    const hasZalo = tags.includes("Zalo") || pancakeDetectZaloFromText(snippet) || pancakeDetectZaloFromText(tagText);
     const product = pancakeClassifyProduct(snippet);
 
     return {
@@ -124,13 +169,19 @@ function pancakeBuildCustomerRow(conv) {
         type: conv.type,
         updated_at: conv.updated_at,
         message_count: conv.message_count || 0,
-        has_phone: Boolean(conv.has_phone),
+        // SĐT/Zalo dạng số được gộp vào cùng một cột. Nếu Pancake chưa nhận has_phone
+        // nhưng snippet/tag có số, vẫn tính là có liên hệ.
+        has_phone: Boolean(conv.has_phone || phones.length),
+        has_zalo: hasZalo,
         phones,
         product,
         hot_lead: pancakeIsHotLead(conv),
-        tags,
+        tags: Array.from(new Set([...tags, ...(hasZalo ? ["Zalo"] : []), ...(phones.length ? ["Có SĐT"] : [])])),
         snippet,
-        ad_ids: conv.ad_ids || []
+        ad_ids: conv.ad_ids || [],
+        ad_name: conv.ad_name || conv.ad?.name || conv.ad_title || "",
+        ad_account_id: conv.ad_account_id || conv.account_id || conv.ad?.account_id || "",
+        ad_account_name: conv.ad_account_name || conv.account_name || conv.ad?.account_name || ""
     };
 }
 
@@ -258,6 +309,9 @@ module.exports = {
     PANCAKE_PAGE_ID,
     PANCAKE_PAGE_ACCESS_TOKEN,
     pancakeCleanHtml,
+    pancakeNormalizeVietnamesePhone,
+    pancakeExtractPhonesFromText,
+    pancakeDetectZaloFromText,
     pancakeGetTagNames,
     pancakeGetPhones,
     pancakeClassifyProduct,
