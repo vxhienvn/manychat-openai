@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>AIGUKA V5 Production Admin</title>
   <style>
-    :root{font-family:Arial,Helvetica,sans-serif;color:#152033;background:#f5f7fb}body{margin:0}header{background:#101828;color:#fff;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}header h1{font-size:20px;margin:0}.wrap{max-width:1180px;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;box-shadow:0 2px 10px rgba(16,24,40,.06)}.row{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #eef2f7;padding:10px 0}.row:first-child{border-top:0}.muted{color:#667085;font-size:13px}.pill{display:inline-block;padding:4px 9px;border-radius:999px;font-size:12px;font-weight:700}.on{background:#dcfae6;color:#067647}.off{background:#fee4e2;color:#b42318}.warn{background:#fef0c7;color:#b54708}button{border:0;border-radius:10px;padding:9px 12px;cursor:pointer;font-weight:700}.btn{background:#155eef;color:#fff}.danger{background:#d92d20;color:#fff}.ghost{background:#eef2f7;color:#344054}.links a{display:inline-block;margin:5px 6px 5px 0;padding:8px 10px;background:#eef2f7;border-radius:10px;color:#344054;text-decoration:none}.log{background:#0b1220;color:#d1e7ff;border-radius:12px;padding:12px;white-space:pre-wrap;max-height:260px;overflow:auto;font-size:12px}input,select,textarea{border:1px solid #d0d5dd;border-radius:10px;padding:9px;width:100%;box-sizing:border-box}label{font-size:13px;font-weight:700;color:#344054}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}@media(max-width:640px){.two{grid-template-columns:1fr}}
+    :root{font-family:Arial,Helvetica,sans-serif;color:#152033;background:#f5f7fb}body{margin:0}header{background:#101828;color:#fff;padding:16px 22px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}header h1{font-size:20px;margin:0}.wrap{max-width:1220px;margin:0 auto;padding:18px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px}.card{background:#fff;border:1px solid #e5e7eb;border-radius:14px;padding:16px;box-shadow:0 2px 10px rgba(16,24,40,.06)}.row{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid #eef2f7;padding:10px 0}.row:first-child{border-top:0}.muted{color:#667085;font-size:13px}.small{font-size:12px}.pill{display:inline-block;padding:4px 9px;border-radius:999px;font-size:12px;font-weight:700;white-space:nowrap}.on{background:#dcfae6;color:#067647}.off{background:#fee4e2;color:#b42318}.warn{background:#fef0c7;color:#b54708}.info{background:#e0f2fe;color:#026aa2}button{border:0;border-radius:10px;padding:9px 12px;cursor:pointer;font-weight:700}button:disabled{opacity:.55;cursor:not-allowed}.btn{background:#155eef;color:#fff}.danger{background:#d92d20;color:#fff}.ghost{background:#eef2f7;color:#344054}.links a{display:inline-block;margin:5px 6px 5px 0;padding:8px 10px;background:#eef2f7;border-radius:10px;color:#344054;text-decoration:none}.log{background:#0b1220;color:#d1e7ff;border-radius:12px;padding:12px;white-space:pre-wrap;max-height:300px;overflow:auto;font-size:12px}input,select,textarea{border:1px solid #d0d5dd;border-radius:10px;padding:9px;width:100%;box-sizing:border-box}label{font-size:13px;font-weight:700;color:#344054}.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}.serverBox{border:1px solid #e5e7eb;border-radius:12px;padding:10px;margin-top:8px;background:#fbfdff}.serverTitle{display:flex;justify-content:space-between;align-items:center;gap:10px;font-weight:800}.serverMeta{margin-top:6px;color:#667085;font-size:12px;line-height:1.45;word-break:break-all}.currentActive{border-color:#12b76a;background:#f6fef9}.currentOff{border-color:#f97066;background:#fffafa}.buttonRow{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}@media(max-width:640px){.two{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -14,7 +14,15 @@
   <div class="grid">
     <section class="card"><h2>✅ Live Checklist</h2><p class="muted">Trước khi bật bot thật: sale_lock ON, policy_engine ON, legacy_reply_bot OFF, slide_engine OFF nếu chưa kiểm tra mapping.</p><button class="ghost" onclick="checkStatus()">Kiểm tra V5 Status</button></section>
     <section class="card"><h2>🤖 Bot trả lời</h2><p class="muted">Công tắc tổng. Tắt ở đây thì mọi module AI đều không gửi tin. Bật nút này mới cho phép CSKH V5 trả lời khách thật.</p><div class="row"><span>Trạng thái trả lời</span><span id="reply2" class="pill off">OFF</span></div><button class="btn" onclick="setReply(true)">Bật trả lời</button> <button class="danger" onclick="setReply(false)">Tắt trả lời</button></section>
-    <section class="card"><h2>🛰️ Server Control</h2><p class="muted">Chỉ một server được xử lý webhook, ghi Supabase và gửi Messenger. Mặc định nên để OFF khi chưa test.</p><div class="row"><span>Server hiện tại</span><span id="serverId" class="pill warn">loading</span></div><div class="row"><span>Active server</span><span id="activeServer" class="pill off">loading</span></div><button class="ghost" onclick="loadServerControl()">Refresh</button> <button class="danger" onclick="setActiveServer('none')">Tắt cả hai</button><br/><br/><button class="btn" onclick="setActiveServer('aiguka')">Bật AIGUKA</button> <button class="btn" onclick="setActiveServer('aiguka_plus')">Bật AIGUKA-Plus</button></section>
+
+    <section class="card"><h2>🛰️ Server Control</h2><p class="muted">Meta chỉ có 1 webhook. Mục này chọn server duy nhất được xử lý webhook, ghi Supabase và gửi Messenger.</p>
+      <div class="row"><span>Server đang mở trang này</span><span id="serverId" class="pill warn">loading</span></div>
+      <div class="row"><span>Server đang xử lý Messenger</span><span id="activeServer" class="pill off">loading</span></div>
+      <div class="muted small" id="serverUpdated">Đang tải...</div>
+      <div id="serverList"></div>
+      <div class="buttonRow"><button class="ghost" onclick="loadServerControl(true)">Refresh</button><button class="danger" onclick="setActiveServer('none')">Tắt cả hai</button><button class="btn" onclick="setActiveServer('aiguka')">Bật AIGUKA</button><button class="btn" onclick="setActiveServer('aiguka_plus')">Bật AIGUKA-Plus</button></div>
+    </section>
+
     <section class="card"><h2>🔗 Liên kết nhanh</h2><div class="links"><a href="/dashboard">Dashboard</a><a href="/admin/ad-mapping.html">Ad Mapping</a><a href="/api/debug/health">Debug Health</a><a href="/api/version">Version</a><a href="/api/v5/status">V5 Status</a><a href="/api/server-control">Server Control JSON</a><a href="/api/modules">Modules JSON</a><a href="/api/sync/messenger?limit=5&messages=20">Sync Messenger</a><a href="/api/debug/latest-conversations?limit=10">Latest Chats</a></div></section>
     <section class="card"><h2>🧪 Test CSKH V5</h2><p class="muted">Test nội bộ, không gửi Messenger.</p><label>Tin khách</label><textarea id="testMsg" rows="3">Tư vấn bộ sen cây</textarea><div class="two"><div><label>Sản phẩm</label><select id="testProduct"><option value="">Tự nhận diện</option><option value="fan">Quạt</option><option value="faucet">Sen vòi/TBVS</option><option value="toilet">Bồn cầu</option><option value="combo">Combo phòng tắm</option><option value="lighting">Đèn</option></select></div><div><label>Intent</label><select id="testIntent"><option value="">Tự nhận diện</option><option value="ask_price">Hỏi giá</option><option value="ask_address">Hỏi địa chỉ</option><option value="ask_more_images">Xin mẫu/ảnh</option><option value="general">Chung</option></select></div></div><br/><button class="btn" onclick="testReply()">Test trả lời</button></section>
   </div>
@@ -23,27 +31,33 @@
 </div>
 <script>
 const log=(x)=>{document.getElementById('log').textContent=typeof x==='string'?x:JSON.stringify(x,null,2)};
-async function api(url,opt){const r=await fetch(url,opt);const txt=await r.text();try{return JSON.parse(txt)}catch(e){return {ok:false,raw:txt,status:r.status}}}
+async function api(url,opt){const u=url+(url.includes('?')?'&':'?')+'_ts='+Date.now();const r=await fetch(u,Object.assign({cache:'no-store'},opt||{}));const txt=await r.text();try{return JSON.parse(txt)}catch(e){return {ok:false,raw:txt,status:r.status}}}
 async function checkStatus(){const r=await api('/api/v5/status');log(r)}
 async function load(){const h=await api('/api/debug/health');document.getElementById('version').textContent=h.version||'unknown';setReplyBadge(!!h.reply_enabled);await loadModules();await loadServerControl();log(h)}
 function setReplyBadge(on){document.getElementById('reply').textContent=on?'REPLY ON':'REPLY OFF';document.getElementById('reply').className='pill '+(on?'on':'off');document.getElementById('reply2').textContent=on?'ON':'OFF';document.getElementById('reply2').className='pill '+(on?'on':'off')}
-
-async function loadServerControl(){
+function fmtTime(x){if(!x)return 'chưa có';try{return new Date(x).toLocaleString('vi-VN')}catch(e){return String(x)}}
+function serverPill(server,active){if(active==='none'||active==='off')return '<span class="pill off">OFF</span>';return server===active?'<span class="pill on">ACTIVE</span>':'<span class="pill warn">STANDBY</span>'}
+function onlinePill(s){return s&&s.online?'<span class="pill on">ONLINE</span>':'<span class="pill off">OFFLINE</span>'}
+async function loadServerControl(silent){
   const r=await api('/api/server-control');
-  const active=(r.control&&r.control.active_server)||'none';
-  document.getElementById('serverId').textContent=r.server_id||'unknown';
-  document.getElementById('serverId').className='pill '+(r.current_server_active?'on':'warn');
-  document.getElementById('activeServer').textContent=active;
-  document.getElementById('activeServer').className='pill '+(active==='none'||active==='off'?'off':(r.current_server_active?'on':'warn'));
+  const view=r.view||{}; const active=view.active_server || (r.control&&r.control.active_server) || 'none';
+  document.getElementById('serverId').textContent=(view.current_server_label||r.server_label||r.server_id||'unknown') + ' / ' + (r.server_id||'');
+  document.getElementById('serverId').className='pill '+(view.current_server_active?'on':'warn');
+  document.getElementById('activeServer').textContent=active==='none'?'NONE - đang tắt cả hai':active;
+  document.getElementById('activeServer').className='pill '+(active==='none'||active==='off'?'off':(view.current_server_active?'on':'warn'));
+  document.getElementById('serverUpdated').textContent='Cập nhật: '+fmtTime(view.updated_at || (r.control&&r.control.updated_at))+' · bởi: '+(view.updated_by || (r.control&&r.control.updated_by) || 'unknown');
+  const servers=(view.servers)||{}; const rows=['aiguka','aiguka_plus'].map(id=>{const s=servers[id]||{};const age=(s.age_sec!=null)?(s.age_sec+'s ago'):'no heartbeat';return '<div class="serverBox '+(id===active?'currentActive':(active==='none'?'currentOff':''))+'"><div class="serverTitle"><span>'+escapeHtml(s.label||id)+'</span><span>'+serverPill(id,active)+' '+onlinePill(s)+'</span></div><div class="serverMeta">URL: '+escapeHtml(s.url||'chưa có')+'<br/>Heartbeat: '+fmtTime(s.heartbeat_at)+' · '+escapeHtml(age)+'</div></div>'}).join('');
+  document.getElementById('serverList').innerHTML=rows;
+  if(!silent) log(r);
   return r;
 }
 async function setActiveServer(active){
-  if(!confirm('Chuyển active_server sang '+active+'?')) return;
+  const label=active==='none'?'TẮT CẢ HAI':active;
+  if(!confirm('Xác nhận chuyển active_server sang '+label+'?\n\nChỉ server được chọn mới xử lý Messenger và ghi Supabase.')) return;
   const r=await api('/api/server-control/active',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({active_server:active,actor:'admin-v5'})});
-  await loadServerControl();
+  await loadServerControl(true);
   log(r);
 }
-
 async function setReply(on){const r=await api('/api/bot-reply-switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:on})});setReplyBadge(!!r.reply_enabled);log(r)}
 async function loadModules(){const r=await api('/api/modules');const box=document.getElementById('modules');const mods=r.modules||[];box.innerHTML=mods.map(m=>'<div class="row"><div><b>'+escapeHtml(m.name)+'</b> <span class="pill '+(m.enabled?'on':'off')+'">'+(m.enabled?'ON':'OFF')+'</span><div class="muted">'+escapeHtml(m.id)+' · '+escapeHtml(m.description||'')+'</div></div><button class="ghost" onclick="toggleModule(\''+escapeJs(m.id)+'\')">Toggle</button></div>').join('')||'Không có module'}
 function escapeHtml(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
@@ -51,5 +65,6 @@ function escapeJs(s){return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\
 async function toggleModule(id){const r=await api('/api/modules/'+id+'/toggle',{method:'POST'});await loadModules();log(r)}
 async function testReply(){const r=await api('/api/v5/test-reply',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:document.getElementById('testMsg').value,productType:document.getElementById('testProduct').value,intent:document.getElementById('testIntent').value})});log(r)}
 load();
+setInterval(()=>loadServerControl(true).catch(()=>{}),10000);
 </script>
 </body></html>

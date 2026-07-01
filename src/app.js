@@ -12,7 +12,7 @@ app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AIGUKA_VERSION = '5.2.1-simple-gateway-control';
+const AIGUKA_VERSION = '5.2.2-gateway-control-ui';
 const moduleRegistry = require('./core-module-registry');
 
 // ===== AIGUKA BOT REPLY MASTER SWITCH =====
@@ -1720,6 +1720,58 @@ async function heartbeatServerControl() {
     }
 }
 
+function parseIsoMs(value) {
+    const t = Date.parse(value || "");
+    return Number.isFinite(t) ? t : 0;
+}
+
+function serverHeartbeatStatus(ts, nowMs = Date.now()) {
+    const ms = parseIsoMs(ts);
+    if (!ms) return { online: false, age_ms: null, age_sec: null, label: "no heartbeat" };
+    const age = Math.max(0, nowMs - ms);
+    return {
+        online: age <= 90 * 1000,
+        age_ms: age,
+        age_sec: Math.round(age / 1000),
+        label: age < 1000 ? "just now" : `${Math.round(age / 1000)}s ago`
+    };
+}
+
+function buildServerControlView(control = {}) {
+    const nowMs = Date.now();
+    const active = normalizeServerId(control.active_server || "none") || "none";
+    return {
+        id: control.id || SERVER_CONTROL_ID,
+        active_server: active,
+        current_server: normalizeServerId(SERVER_ID),
+        current_server_label: SERVER_LABEL,
+        current_server_active: active === normalizeServerId(SERVER_ID),
+        updated_at: control.updated_at || null,
+        updated_by: control.updated_by || null,
+        notes: control.notes || null,
+        servers: {
+            aiguka: {
+                id: "aiguka",
+                label: "AIGUKA",
+                url: serverTargetUrl("aiguka", control) || null,
+                heartbeat_at: control.aiguka_heartbeat_at || null,
+                ...serverHeartbeatStatus(control.aiguka_heartbeat_at, nowMs)
+            },
+            aiguka_plus: {
+                id: "aiguka_plus",
+                label: "AIGUKA-Plus",
+                url: serverTargetUrl("aiguka_plus", control) || null,
+                heartbeat_at: control.aiguka_plus_heartbeat_at || null,
+                ...serverHeartbeatStatus(control.aiguka_plus_heartbeat_at, nowMs)
+            }
+        },
+        targets: {
+            aiguka: serverTargetUrl("aiguka", control) || null,
+            aiguka_plus: serverTargetUrl("aiguka_plus", control) || null
+        }
+    };
+}
+
 async function debugFetchMessagesForConversationIds(ids, includeRaw = false, perConversationLimit = 200) {
     const cleanIds = (ids || []).map(String).filter(Boolean);
     if (!cleanIds.length) return [];
@@ -1759,18 +1811,21 @@ app.get('/api/v5/status', (req, res) => {
 
 app.get('/api/server-control', async (req, res) => {
     if (!requireAigukaDebugAccess(req, res)) return;
+    res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.set('Pragma', 'no-cache');
+    res.set('Expires', '0');
     const control = await getServerControl(true);
+    const view = buildServerControlView(control);
     res.json({
         ok: true,
         version: AIGUKA_VERSION,
         server_id: SERVER_ID,
         server_label: SERVER_LABEL,
-        current_server_active: normalizeServerId(control.active_server) === normalizeServerId(SERVER_ID),
+        current_server_active: view.current_server_active,
+        active_server: view.active_server,
+        view,
         control,
-        targets: {
-            aiguka: serverTargetUrl('aiguka', control) || null,
-            aiguka_plus: serverTargetUrl('aiguka_plus', control) || null
-        }
+        targets: view.targets
     });
 });
 
@@ -8858,8 +8913,10 @@ app.get('/meta-debug', async (req, res) => {
 
 
 function startBackgroundJobs() {
-    // V5.2.1 giữ Server Control đơn giản: chưa bật heartbeat/auto-failover.
-    // Heartbeat sẽ chuyển sang V5.3 để tránh làm phức tạp vận hành production.
+    // V5.2.2: heartbeat nhẹ để Admin biết server nào còn sống. Không tự failover.
+    heartbeatServerControl().catch(console.error);
+    setInterval(() => heartbeatServerControl().catch(console.error), 30 * 1000);
+
     loadAdMappingsFromSupabase().catch(console.error);
     loadProductItemsFromSupabase().catch(console.error);
     loadWorkingSettingsFromSupabase().catch(console.error);
