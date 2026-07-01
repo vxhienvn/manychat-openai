@@ -4,6 +4,15 @@ const fs = require('fs');
 const path = require('path');
 const { loadProductRows, findBestProductRow, buildPriceRangeReply, buildProductIntroWithPrice } = require('./services/productSheetService');
 const { listProductImagesByPath, debugDrivePath, driveReady } = require('./services/productDriveService');
+const saleCenterSchedule = require('./sale-center/scheduleService');
+const {
+    normalizeBotMode: normalizeSaleBotMode,
+    normalizeConfig: normalizeSaleCenterConfig,
+    normalizeWindowList: normalizeSaleWindowList,
+    mergeWindows: mergeSaleWindows,
+    resolveModeAt: resolveSaleModeAt,
+    delayMsForMode: saleDelayMsForMode
+} = saleCenterSchedule;
 
 const app = express();
 app.use(express.json({ limit: '2mb' }));
@@ -12,7 +21,7 @@ app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AIGUKA_VERSION = '5.2.2-gateway-control-ui';
+const AIGUKA_VERSION = '5.2.3-sale-center-modular';
 const moduleRegistry = require('./core-module-registry');
 
 // ===== AIGUKA BOT REPLY MASTER SWITCH =====
@@ -3672,9 +3681,9 @@ function isOfficeHoursVN(time = Date.now()) {
 
 function getBotDelayMs(time = Date.now()) {
     const st = currentWorkingSettings();
-    const inOffice = isOfficeHoursVN(time);
-    const minutes = inOffice ? Number(st.admin_pause_minutes || st.customer_wait_minutes || 10) : Number(st.outside_wait_minutes || st.customer_wait_minutes || 5);
-    return Math.max(0, minutes) * 60 * 1000;
+    const modeInfo = getCurrentBotMode(time);
+    const delay = saleDelayMsForMode(st, modeInfo.mode);
+    return delay === null ? null : delay;
 }
 
 function clearCustomerReplyTimer(senderId) {
@@ -3752,11 +3761,15 @@ let workingSettingsCache = {
     timezone: "Asia/Ho_Chi_Minh",
     work_start: "08:00",
     work_end: "22:00",
+    bot_mode: "support",
     reply_windows: [],
+    working_windows: saleCenterSchedule.DEFAULT_WORKING_CONFIG.working_windows,
+    after_hours_windows: saleCenterSchedule.DEFAULT_WORKING_CONFIG.after_hours_windows,
     is_open: true,
     holiday_mode: false,
     staff_online_count: 1,
     admin_pause_minutes: 10,
+    support_wait_minutes: 10,
     customer_wait_minutes: 5,
     outside_wait_minutes: 5,
     carousel_cooldown_minutes: 5,
@@ -3823,29 +3836,13 @@ function parseClockMinutes(value = "08:00") {
 }
 
 function normalizeReplyMode(value = '') {
-    const v = String(value || '').toLowerCase().trim();
-    return ['on', 'off'].includes(v) ? v : 'on';
+    return normalizeSaleBotMode(value || 'support');
 }
 
 function normalizeReplyWindows(value) {
-    let list = value;
-    if (typeof list === 'string') {
-        try { list = JSON.parse(list); } catch (_) { list = []; }
-    }
-    if (!Array.isArray(list)) return [];
-    return list.map((raw, index) => {
-        const start = String(raw?.start || raw?.work_start || raw?.from || '08:00').slice(0, 5);
-        const end = String(raw?.end || raw?.work_end || raw?.to || '22:00').slice(0, 5);
-        return {
-            id: String(raw?.id || `window_${index + 1}`),
-            enabled: raw?.enabled === false ? false : true,
-            start: /^\d{1,2}:\d{2}$/.test(start) ? start.padStart(5, '0') : '08:00',
-            end: /^\d{1,2}:\d{2}$/.test(end) ? end.padStart(5, '0') : '22:00',
-            mode: normalizeReplyMode(raw?.mode),
-            label: String(raw?.label || raw?.name || '').slice(0, 80)
-        };
-    }).filter(w => w.enabled !== false && w.start && w.end);
+    return normalizeSaleWindowList(value, []);
 }
+
 
 function minutesInWindow(nowMin, startMin, endMin) {
     if (startMin === endMin) return true;
@@ -3872,15 +3869,7 @@ async function loadWorkingSettingsFromSupabase() {
         if (Array.isArray(rows) && rows[0]) {
             const r = rows[0];
             workingSettingsCache = {
-                ...workingSettingsCache,
-                ...r,
-                is_open: r.is_open !== false,
-                holiday_mode: Boolean(r.holiday_mode),
-                reply_windows: normalizeReplyWindows(r.reply_windows || r.replyWindows || []),
-                admin_pause_minutes: Math.max(1, Number(r.admin_pause_minutes || 10)),
-                customer_wait_minutes: Math.max(0, Number(r.customer_wait_minutes || 5)),
-                outside_wait_minutes: Math.max(0, Number(r.outside_wait_minutes || r.customer_wait_minutes || 5)),
-                carousel_cooldown_minutes: Math.max(1, Number(r.carousel_cooldown_minutes || 5)),
+                ...normalizeSaleCenterConfig({ ...workingSettingsCache, ...r }),
                 loadedAt: new Date().toISOString(),
                 source: "supabase"
             };
@@ -3895,22 +3884,13 @@ function currentWorkingSettings() {
     return workingSettingsCache || {};
 }
 
-function isBotOpenBySettings(time = Date.now()) {
+function getCurrentBotMode(time = Date.now()) {
     const st = currentWorkingSettings();
-    if (st.is_open === false) return false;
-    const nowMin = getVietnamMinutes(new Date(time));
-    const windows = normalizeReplyWindows(st.reply_windows || st.replyWindows || []);
-    if (windows.length) {
-        // Nếu nhiều khung giờ được cấu hình: khung khớp gần nhất quyết định bật/tắt.
-        // Không khớp khung nào thì tắt để tránh bot chen vào ngoài kế hoạch.
-        const matched = windows.find(w => minutesInWindow(nowMin, parseClockMinutes(w.start), parseClockMinutes(w.end)));
-        return matched ? matched.mode !== 'off' : false;
-    }
-    const start = parseClockMinutes(st.work_start || "08:00");
-    const end = parseClockMinutes(st.work_end || "22:00");
-    if (start === end) return true;
-    if (start < end) return nowMin >= start && nowMin < end;
-    return nowMin >= start || nowMin < end;
+    return resolveSaleModeAt(st, time);
+}
+
+function isBotOpenBySettings(time = Date.now()) {
+    return getCurrentBotMode(time).mode !== 'off';
 }
 
 function groupMatches(a = "", b = "") {
@@ -4991,7 +4971,14 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
     }
 
     clearCustomerReplyTimer(senderId);
+    const modeInfo = getCurrentBotMode(now);
     const delay = getBotDelayMs(now);
+    if (delay === null) {
+        console.log('[SALE_CENTER] bot mode OFF; customer message saved only', senderId, modeInfo);
+        state.pendingBotReplyDueAt = null;
+        saveCustomerStates(customerStates);
+        return;
+    }
     const dueAt = now + delay;
     state.pendingBotReplyDueAt = dueAt;
     saveCustomerStates(customerStates);
@@ -5000,7 +4987,7 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
         senderId,
         pageId: event?.recipient?.id || "",
         dueAtMs: dueAt,
-        reason: isOfficeHoursVN(now) ? `office_delay_${Number(currentWorkingSettings().admin_pause_minutes || 10)}m` : `outside_delay_${Number(currentWorkingSettings().outside_wait_minutes || currentWorkingSettings().customer_wait_minutes || 5)}m`
+        reason: `sale_center_${modeInfo.mode}_${Math.round(delay / 60000)}m`
     }).then(result => {
         if (result?.ok) console.log("Durable pending reply", result.action, senderId, result.due_at);
     }).catch(err => console.error("Durable pending schedule promise error:", err.message));
@@ -5026,7 +5013,7 @@ function registerAndScheduleAiguka4CustomerMessage(senderId, event, customerMess
     }, delay);
 
     customerReplyTimers.set(senderId, timer);
-    console.log(`AIGUKA4 scheduled reply for ${senderId} in ${Math.round(delay / 60000)} minutes`);
+    console.log(`AIGUKA4 scheduled reply for ${senderId} in ${Math.round(delay / 60000)} minutes`, getCurrentBotMode(now));
 }
 
 function clearHumanTakeoverTimer(senderId) {
@@ -6777,24 +6764,52 @@ app.post('/api/working-settings/reload', async (req, res) => {
     }
 });
 
+app.get('/api/sale-center/config', async (req, res) => {
+    try {
+        await loadWorkingSettingsFromSupabase();
+        const settings = normalizeSaleCenterConfig(currentWorkingSettings());
+        res.json({ success: true, version: AIGUKA_VERSION, settings, mode: getCurrentBotMode(Date.now()) });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.get('/api/sale-center/status', async (req, res) => {
+    try {
+        await loadWorkingSettingsFromSupabase();
+        res.json({ success: true, version: AIGUKA_VERSION, status: getCurrentBotMode(Date.now()), settings: normalizeSaleCenterConfig(currentWorkingSettings()) });
+    } catch (error) {
+        res.status(500).json({ success: false, error: error.message });
+    }
+});
+
+app.post('/api/sale-center/config', async (req, res, next) => {
+    req.url = '/api/working-settings';
+    next();
+});
+
 app.post('/api/working-settings', async (req, res) => {
     try {
-        const payload = {
+        const payload = normalizeSaleCenterConfig({
             setting_key: "default",
             timezone: "Asia/Ho_Chi_Minh",
+            bot_mode: req.body?.bot_mode || req.body?.mode || "support",
             work_start: req.body?.work_start || "08:00",
             work_end: req.body?.work_end || "22:00",
-            reply_windows: normalizeReplyWindows(req.body?.reply_windows || req.body?.replyWindows || []),
+            working_windows: req.body?.working_windows || req.body?.workingWindows || [],
+            after_hours_windows: req.body?.after_hours_windows || req.body?.afterHoursWindows || [],
+            reply_windows: req.body?.reply_windows || req.body?.replyWindows || [],
             is_open: req.body?.is_open !== false,
             holiday_mode: Boolean(req.body?.holiday_mode),
             staff_online_count: Number(req.body?.staff_online_count || 1),
             admin_pause_minutes: Math.max(1, Number(req.body?.admin_pause_minutes || 10)),
+            support_wait_minutes: Math.max(0, Number(req.body?.support_wait_minutes || req.body?.customer_wait_minutes || 10)),
             customer_wait_minutes: Math.max(0, Number(req.body?.customer_wait_minutes || 5)),
             outside_wait_minutes: Math.max(0, Number(req.body?.outside_wait_minutes || req.body?.customer_wait_minutes || 5)),
             carousel_cooldown_minutes: Math.max(1, Number(req.body?.carousel_cooldown_minutes || 5)),
-            note: String(req.body?.note || ""),
-            updated_at: new Date().toISOString()
-        };
+            note: String(req.body?.note || "")
+        });
+        payload.updated_at = new Date().toISOString();
         if (!supabaseIsReady()) {
             workingSettingsCache = { ...workingSettingsCache, ...payload, loadedAt: new Date().toISOString(), source: "memory_only_supabase_disabled" };
             return res.json({ success: true, warning: "Supabase chưa bật, dữ liệu mới chỉ lưu RAM.", settings: workingSettingsCache });
@@ -6808,9 +6823,13 @@ app.post('/api/working-settings', async (req, res) => {
             });
         } catch (saveError) {
             // Nếu DB chưa chạy migration thêm reply_windows, vẫn lưu các cột cũ và giữ windows trong RAM.
-            if (/reply_windows/i.test(String(saveError.message || ''))) {
+            if (/(reply_windows|working_windows|after_hours_windows|bot_mode|support_wait_minutes)/i.test(String(saveError.message || ''))) {
                 const fallbackPayload = { ...payload };
                 delete fallbackPayload.reply_windows;
+                delete fallbackPayload.working_windows;
+                delete fallbackPayload.after_hours_windows;
+                delete fallbackPayload.bot_mode;
+                delete fallbackPayload.support_wait_minutes;
                 saved = await supabaseRequest(`${WORKING_SETTINGS_TABLE}?on_conflict=setting_key`, {
                     method: "POST",
                     headers: { Prefer: "resolution=merge-duplicates,return=representation" },
