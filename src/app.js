@@ -549,14 +549,120 @@ function isLikelyPancakeCommentAuto(text = "", msg = {}) {
     return hasCommentSignal && hasAutoIntent;
 }
 
+
+
+// ===== AIGUKA 5.4.3: Actor Identity / Role Classifier =====
+// Chỉ actor_type=human_admin mới được coi là sale thật và kích hoạt admin takeover.
+// Botcake/Pancake auto/Meta auto/AIGUKA/page system không được coi là sale đã trả lời.
+function splitEnvNames(value = "") {
+    return String(value || "")
+        .split(/[;,|\n]/)
+        .map(x => x.trim())
+        .filter(Boolean);
+}
+
+const DEFAULT_BOT_ACTOR_NAMES = [
+    'botcake', 'bot cake', 'pancake bot', 'page bot', 'aiguka', 'manychat',
+    'messenger', 'meta', 'automation', 'auto', 'tự động', 'tu dong', 'hệ thống', 'he thong'
+];
+const DEFAULT_HUMAN_ADMIN_NAMES = ['Yến Nguyễn', 'Yen Nguyen', 'Nga Dương', 'Nga Duong'];
+const BOT_ACTOR_NAMES = splitEnvNames(process.env.AIGUKA_BOT_ACTOR_NAMES || '').concat(DEFAULT_BOT_ACTOR_NAMES);
+const HUMAN_ADMIN_NAMES = splitEnvNames(process.env.AIGUKA_HUMAN_ADMIN_NAMES || '').concat(DEFAULT_HUMAN_ADMIN_NAMES);
+
+function normalizeActorName(value = '') {
+    return normalizeVietnameseForMatch(String(value || ''));
+}
+
+function nameMatchesRegistry(name = '', registry = []) {
+    const n = normalizeActorName(name);
+    if (!n) return false;
+    return registry.some(item => {
+        const r = normalizeActorName(item);
+        return r && (n === r || n.includes(r) || r.includes(n));
+    });
+}
+
+function extractActorNameFromMessage(msg = {}) {
+    const candidates = [
+        msg.actor_name, msg.admin_name, msg.staff_name, msg.sender_name, msg.user_name,
+        msg.from_name, msg.page_name, msg.name,
+        msg.from?.name, msg.sender?.name, msg.user?.name, msg.user?.full_name,
+        msg.admin?.name, msg.admin?.full_name, msg.operator?.name, msg.created_by?.name,
+        msg.creator?.name, msg.agent?.name
+    ];
+    for (const c of candidates) {
+        const v = String(c || '').trim();
+        if (v) return v;
+    }
+    return '';
+}
+
+function isLikelyAutoOutboundText(text = '') {
+    const h = normalizeVietnameseForMatch(text || '');
+    if (!h) return false;
+    const phrases = [
+        'cam on ban da quan tam',
+        'cam on anh chi da quan tam',
+        'cam on a c da quan tam',
+        'da quan tam cac mau',
+        'tong kho anh duong hotline',
+        'khong biet minh dang tham khao mau nao ben em de em ho tro',
+        'nhan bao gia moi nhat',
+        'tu dong gui tin nhan',
+        'auto inbox',
+        'auto reply',
+        'messenger attachment'
+    ];
+    if (phrases.some(p => h.includes(p))) return true;
+    // Mẫu chào tự động thường: "Chào <tên>, Cảm ơn bạn/anh chị đã quan tâm..."
+    if (h.startsWith('chao ') && h.includes('cam on') && h.includes('quan tam')) return true;
+    return false;
+}
+
+function classifyOutboundActor({ text = '', msg = {}, source = 'unknown', defaultPageUnknownRole = 'page' } = {}) {
+    const actorName = extractActorNameFromMessage(msg);
+    const actorNameNorm = normalizeActorName(actorName);
+    if (actorName && nameMatchesRegistry(actorName, BOT_ACTOR_NAMES)) {
+        const isBotcake = actorNameNorm.includes('botcake') || actorNameNorm.includes('bot cake');
+        return { role: 'bot', actor_type: isBotcake ? 'botcake' : 'page_auto', actor_name: actorName, source: isBotcake ? 'pancake_botcake' : source, locksSale: false };
+    }
+    if (isLikelyPancakeCommentAuto(text, msg) || isLikelyAutoOutboundText(text)) {
+        return { role: 'bot', actor_type: source.includes('pancake') ? 'pancake_auto' : 'meta_auto', actor_name: actorName || 'Auto', source: source.includes('pancake') ? 'pancake_auto' : 'meta_auto', locksSale: false };
+    }
+    if (actorName && nameMatchesRegistry(actorName, HUMAN_ADMIN_NAMES)) {
+        return { role: 'admin', actor_type: 'human_admin', actor_name: actorName, source: source.includes('pancake') ? 'pancake_human_admin' : 'human_admin', locksSale: true };
+    }
+    // Pancake có admin_id/user admin nhưng thiếu tên: có thể coi là human admin, nhưng vẫn log rõ confidence thấp.
+    if (msg.is_admin === true || msg.admin_id || msg.user?.is_admin || msg.admin?.id || msg.operator?.id || msg.agent?.id) {
+        return { role: 'admin', actor_type: 'human_admin', actor_name: actorName || 'unknown_admin', source: source.includes('pancake') ? 'pancake_human_admin' : 'human_admin', locksSale: true };
+    }
+    // Meta echo/page outbound không đủ danh tính thì KHÔNG khóa sale mặc định.
+    return { role: defaultPageUnknownRole, actor_type: 'page_unknown', actor_name: actorName || '', source, locksSale: false };
+}
+
+function supabaseRowActorType(row = {}) {
+    const raw = row.raw || {};
+    const rawActor = raw.actor_type || raw.actor?.type || raw.classified_actor_type || raw.message_actor_type;
+    if (rawActor) return String(rawActor).toLowerCase();
+    const source = String(row.source || raw.source || '').toLowerCase();
+    const role = String(row.role || '').toLowerCase();
+    const text = String(row.text || '');
+    if (role === 'customer' || role === 'user') return 'customer';
+    if (role === 'bot' || source.includes('bot') || source.includes('auto') || source.includes('aiguka') || isLikelyAutoOutboundText(text)) return 'auto_or_bot';
+    if (role === 'page') return 'page_unknown';
+    if (role === 'admin' || role === 'sale') return 'human_admin';
+    return 'unknown';
+}
+
+function isHumanAdminSupabaseRow(row = {}) {
+    return supabaseRowActorType(row) === 'human_admin';
+}
+
 function classifyPageOutboundMessage(customerId, text = "", createdAtIso = "", msg = {}) {
     if (isLikelyBotOutbound(customerId, text, createdAtIso)) {
-        return { role: 'bot', source: 'messenger_graph_bot_ai', locksSale: false };
+        return { role: 'bot', source: 'messenger_graph_bot_ai', actor_type: 'aiguka_bot', actor_name: 'AIGUKA', locksSale: false };
     }
-    if (isLikelyPancakeCommentAuto(text, msg)) {
-        return { role: 'bot', source: 'pancake_comment_auto', locksSale: false };
-    }
-    return { role: 'admin', source: 'messenger_graph_page_admin', locksSale: true };
+    return classifyOutboundActor({ text, msg, source: 'messenger_graph_page_unknown', defaultPageUnknownRole: 'page' });
 }
 
 async function logMessengerGraphMessageToSupabase(thread = {}, msg = {}, options = {}) {
@@ -596,7 +702,7 @@ async function logMessengerGraphMessageToSupabase(thread = {}, msg = {}, options
         intent: detectCustomerIntent(text),
         source,
         externalMessageId: messageId,
-        raw: { source: 'messenger_graph_sync', classified_source: source, role, from_id: fromId, page_id: pageId, to_ids: toList, participant_customer_id: participantCustomerId, thread_id: thread.id || null, external_message_id: messageId || null, graph_message: msg, graph_thread: { id: thread.id, updated_time: thread.updated_time, participants: thread.participants || null } }
+        raw: { source: 'messenger_graph_sync', classified_source: source, role, actor_type: pageClass.actor_type || null, actor_name: pageClass.actor_name || null, locks_sale: Boolean(pageClass.locksSale), from_id: fromId, page_id: pageId, to_ids: toList, participant_customer_id: participantCustomerId, thread_id: thread.id || null, external_message_id: messageId || null, graph_message: msg, graph_thread: { id: thread.id, updated_time: thread.updated_time, participants: thread.participants || null } }
     });
 
     if (role === 'admin' && pageClass.locksSale) {
@@ -980,9 +1086,11 @@ function historyLineFromSupabaseMessage(row = {}) {
     const ts = row.created_at ? Date.parse(row.created_at) : Date.now();
     const ms = Number.isFinite(ts) ? ts : Date.now();
     const product = row.product_group || row.product_item_key || 'unknown';
-    if (role === 'customer' || role === 'user') return `Khách: ${text} | TIME:${ms} | PRODUCT:${product}`;
-    if (role === 'admin' || role === 'page' || role === 'sale') return `Admin: ${text} | TIME:${ms} | PRODUCT:${product}`;
-    if (role === 'bot' || role === 'assistant') return `Bot: ${text} | TIME:${ms} | PRODUCT:${product}`;
+    const actorType = supabaseRowActorType(row);
+    if (role === 'customer' || role === 'user' || actorType === 'customer') return `Khách: ${text} | TIME:${ms} | PRODUCT:${product}`;
+    if (actorType === 'human_admin') return `Admin: ${text} | TIME:${ms} | PRODUCT:${product}`;
+    if (role === 'bot' || role === 'assistant' || actorType === 'auto_or_bot') return `Bot: ${text} | TIME:${ms} | PRODUCT:${product}`;
+    if (role === 'page' || actorType === 'page_unknown') return `PageAuto: ${text} | TIME:${ms} | PRODUCT:${product}`;
     return `${role || 'Message'}: ${text} | TIME:${ms} | PRODUCT:${product}`;
 }
 
@@ -990,7 +1098,7 @@ async function hydrateLocalHistoryFromSupabase(senderId, limit = 80) {
     if (!supabaseIsReady() || !senderId) return { ok: false, reason: 'supabase_or_sender_missing' };
     try {
         const rows = await supabaseRequest(
-            `messages?sender_id=eq.${encodeURIComponent(String(senderId))}&select=created_at,role,text,product_group,product_item_key,page_id&order=created_at.asc&limit=${Math.max(10, Number(limit) || 80)}`,
+            `messages?sender_id=eq.${encodeURIComponent(String(senderId))}&select=created_at,role,text,product_group,product_item_key,page_id,source,raw&order=created_at.asc&limit=${Math.max(10, Number(limit) || 80)}`,
             { method: 'GET' }
         );
         const list = Array.isArray(rows) ? rows : [];
@@ -1039,17 +1147,31 @@ async function scanSupabaseStaleUnansweredConversations(limit = 80) {
             if (!senderId) { addSkip('missing_sender_id', { conv_id: conv.id || null }); continue; }
             checked++;
             const msgRows = await supabaseRequest(
-                `messages?conversation_id=eq.${encodeURIComponent(String(conv.id))}&select=created_at,role,text,product_group,product_item_key,page_id&order=created_at.desc&limit=30`,
+                `messages?conversation_id=eq.${encodeURIComponent(String(conv.id))}&select=created_at,role,text,product_group,product_item_key,page_id,source,raw&order=created_at.desc&limit=60`,
                 { method: 'GET' }
             );
             const messagesDesc = Array.isArray(msgRows) ? msgRows : [];
             if (!messagesDesc.length) { addSkip('no_messages_by_conversation_id', { senderId, conv_id: conv.id || null }); continue; }
-            const last = messagesDesc[0];
-            const lastRole = String(last.role || '').toLowerCase();
-            const lastText = String(last.text || '').slice(0, 80);
-            if (lastRole !== 'customer') { addSkip('last_not_customer', { senderId, lastRole, lastText }); continue; }
-            const lastCustomerMs = Date.parse(last.created_at || '');
-            if (!Number.isFinite(lastCustomerMs)) { addSkip('invalid_last_customer_time', { senderId, created_at: last.created_at || null }); continue; }
+
+            // AIGUKA 5.4.3: không hỏi "tin cuối là ai" nữa.
+            // Hỏi đúng nghiệp vụ: có tin khách nào đang chờ, sau đó chưa có HUMAN_ADMIN thật trả lời không?
+            const lastCustomer = messagesDesc.find(r => ['customer', 'user'].includes(String(r.role || '').toLowerCase()));
+            if (!lastCustomer) {
+                const last = messagesDesc[0] || {};
+                addSkip('no_customer_message', { senderId, lastRole: String(last.role || ''), actorType: supabaseRowActorType(last), lastText: String(last.text || '').slice(0, 80) });
+                continue;
+            }
+            const lastText = String(lastCustomer.text || '').slice(0, 80);
+            const lastCustomerMs = Date.parse(lastCustomer.created_at || '');
+            if (!Number.isFinite(lastCustomerMs)) { addSkip('invalid_last_customer_time', { senderId, created_at: lastCustomer.created_at || null }); continue; }
+            const humanAfterCustomer = messagesDesc.find(r => {
+                const t = Date.parse(r.created_at || '');
+                return Number.isFinite(t) && t > lastCustomerMs && isHumanAdminSupabaseRow(r);
+            });
+            if (humanAfterCustomer) {
+                addSkip('human_admin_after_customer', { senderId, actorType: supabaseRowActorType(humanAfterCustomer), humanText: String(humanAfterCustomer.text || '').slice(0, 80), lastText });
+                continue;
+            }
             const ageMs = now - lastCustomerMs;
             if (ageMs < STALE_UNANSWERED_SCAN_MS) { addSkip('too_recent', { senderId, age_min: Math.round(ageMs / 60000), wait_min: STALE_UNANSWERED_SCAN_MINUTES, lastText }); continue; }
             const allText = messagesDesc.map(r => r.text || '').join(' ');
@@ -1071,13 +1193,11 @@ async function scanSupabaseStaleUnansweredConversations(limit = 80) {
                 addSkip('hydrate_failed', { senderId, hydrate_reason: hydrateResult?.reason || hydrateResult?.error || 'unknown', lastText });
                 continue;
             }
-            const localVerdict = shouldScheduleStaleUnansweredFromLocal(senderId, now);
-            if (!localVerdict.ok) { addSkip(`local_${localVerdict.reason || 'unknown'}`, { senderId, lastText }); continue; }
 
             const dueAt = now + 1000;
             state.pendingBotReplyDueAt = dueAt;
             state.lastCustomerTime = lastCustomerMs;
-            state.lastPageId = conv.page_id || last.page_id || state.lastPageId || '';
+            state.lastPageId = conv.page_id || lastCustomer.page_id || state.lastPageId || '';
             customerStates[senderId] = state;
             saveCustomerStates(customerStates);
             const result = await scheduleDurablePendingReply({
@@ -6999,19 +7119,30 @@ function pancakeAttachmentUrl(msg = {}) {
     return "";
 }
 
-function inferPancakeMessageRole(msg = {}, conv = {}) {
+function inferPancakeMessageActor(msg = {}, conv = {}) {
+    const text = pancakeMessageText(msg);
     const fromId = String(msg.from?.id || msg.from_id || msg.sender_id || msg.user_id || msg.uid || "");
     const fromType = String(msg.from?.type || msg.sender_type || msg.type || msg.role || "").toLowerCase();
     const pageId = String(PANCAKE_PAGE_ID || conv.page_id || "");
     const customerId = pancakeCustomerSenderId(conv);
 
-    if (msg.is_from_page === true || msg.from_page === true || msg.is_page === true) return "admin";
-    if (msg.is_admin === true || msg.admin_id || msg.user?.is_admin) return "admin";
-    if (fromType.includes("admin") || fromType.includes("page") || fromType.includes("user")) return "admin";
-    if (pageId && fromId && fromId === pageId) return "admin";
-    if (customerId && fromId && fromId === customerId) return "customer";
-    if (msg.is_echo === true) return "admin";
-    return "pancake_unknown";
+    if (customerId && fromId && fromId === customerId) {
+        return { role: 'customer', actor_type: 'customer', actor_name: extractActorNameFromMessage(msg) || 'customer', source: 'pancake_customer', locksSale: false };
+    }
+    if (fromType.includes('customer')) {
+        return { role: 'customer', actor_type: 'customer', actor_name: extractActorNameFromMessage(msg) || 'customer', source: 'pancake_customer', locksSale: false };
+    }
+    if (msg.is_from_page === true || msg.from_page === true || msg.is_page === true || pageId && fromId && fromId === pageId || msg.is_echo === true) {
+        return classifyOutboundActor({ text, msg, source: 'pancake_page_unknown', defaultPageUnknownRole: 'page' });
+    }
+    if (msg.is_admin === true || msg.admin_id || msg.user?.is_admin || fromType.includes('admin') || fromType.includes('user') || fromType.includes('staff')) {
+        return classifyOutboundActor({ text, msg, source: 'pancake_human_admin', defaultPageUnknownRole: 'page' });
+    }
+    return { role: 'pancake_unknown', actor_type: 'unknown', actor_name: extractActorNameFromMessage(msg) || '', source: 'pancake_unknown', locksSale: false };
+}
+
+function inferPancakeMessageRole(msg = {}, conv = {}) {
+    return inferPancakeMessageActor(msg, conv).role;
 }
 
 function looksLikePancakeMessage(obj) {
@@ -7146,7 +7277,8 @@ async function logPancakeMessageToSupabase(conv = {}, msg = {}) {
     const attachmentUrl = pancakeAttachmentUrl(msg);
     const createdAt = new Date(pancakeMessageCreatedAt(msg, conv));
     const createdAtIso = Number.isNaN(createdAt.getTime()) ? new Date().toISOString() : createdAt.toISOString();
-    const role = inferPancakeMessageRole(msg, conv);
+    const actor = inferPancakeMessageActor(msg, conv);
+    const role = actor.role;
     const productGroup = pancakeToDbProductGroup(summary.product, text || summary.snippet);
     const intent = detectCustomerIntent(text);
 
@@ -7185,12 +7317,12 @@ async function logPancakeMessageToSupabase(conv = {}, msg = {}) {
             message_type: attachmentUrl ? "attachment" : "text",
             text: text || (attachmentUrl ? "[pancake attachment]" : ""),
             attachment_url: attachmentUrl || null,
-            raw: { source: "pancake_sync", pancake_conversation_id: conv.id, pancake_message_id: externalId || null, contact_info: contact, message: msg },
+            raw: { source: "pancake_sync", actor_type: actor.actor_type || null, actor_name: actor.actor_name || null, locks_sale: Boolean(actor.locksSale), pancake_conversation_id: conv.id, pancake_message_id: externalId || null, contact_info: contact, message: msg },
             ad_id: (summary.ad_ids || [])[0] || null,
             post_id: null,
             product_group: productGroup || null,
             intent: intent || null,
-            source: "pancake_sync",
+            source: actor.source || "pancake_sync",
             external_message_id: externalId || null,
             created_at: createdAtIso
         })
@@ -7198,7 +7330,7 @@ async function logPancakeMessageToSupabase(conv = {}, msg = {}) {
 
     // AIGUKA 4.2.5: nếu Pancake cho thấy sale/admin đã trả lời, khóa quyền hội thoại cho sale.
     // Điều này bù cho trường hợp Meta echo không báo về server nhưng Pancake đã có tin nhân viên.
-    if (role === "admin") {
+    if (actor.actor_type === "human_admin" && actor.locksSale) {
         const ageMs = Date.now() - createdAt.getTime();
         if (Number.isFinite(ageMs) && ageMs >= 0 && ageMs <= 6 * 60 * 60 * 1000) {
             const hist = conversations[senderId] || [];
@@ -7206,7 +7338,7 @@ async function logPancakeMessageToSupabase(conv = {}, msg = {}) {
             if (!exists) {
                 startHumanTakeover(senderId, text || "[pancake attachment]", Date.now());
             } else {
-                cancelBotReplyBecauseSaleAnswered(senderId, "pancake_admin_sync");
+                cancelBotReplyBecauseSaleAnswered(senderId, "pancake_human_admin_sync");
             }
         }
     }
