@@ -1,8 +1,30 @@
 {
-  "brainVersion": "5.4.0",
+  "brainVersion": "5.4.6",
   "constitutionVersion": "2.0",
   "updatedAt": "2026-07-02",
   "principle": "Core Stable - Knowledge Evolves",
-  "modules": ["constitution", "rules", "policies", "casebook", "context_resolver", "session_manager", "knowledge_engine", "slide_engine", "behavior_engine"],
-  "activeArticles": [8,9,10,11,12,13,14,21,22]
+  "modules": [
+    "behavior_engine",
+    "message_gateway",
+    "knowledge_engine",
+    "slide_engine",
+    "context_resolver",
+    "session_manager",
+    "rules",
+    "constitution",
+    "casebook",
+    "policies"
+  ],
+  "activeArticles": [
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    21,
+    22,
+    23
+  ]
 }

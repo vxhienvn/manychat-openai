@@ -1,0 +1,14 @@
+{
+  "id": 23,
+  "title": "Message Gateway and Trace Policy",
+  "priority": "critical",
+  "enabled": true,
+  "rule": "Mọi tin nhắn outbound của AIGUKA phải đi qua Message Gateway. Gateway kiểm tra Bot ON/OFF, admin takeover, SAFE_SEND, duplicate phone ask và ghi trace rõ nguồn gửi trước khi gọi Facebook Send API.",
+  "actions": [
+    "route_all_outbound_messages_through_gateway",
+    "block_when_bot_reply_switch_off",
+    "trace_source_worker_or_webhook",
+    "rewrite_repeated_phone_ask_to_messenger_care_reply",
+    "do_not_mark_pending_done_when_send_blocked"
+  ]
+}

@@ -2,54 +2,49 @@ const config = require("../config");
 
 const { PAGE_ACCESS_TOKEN } = config;
 
-async function sendMessage(senderId, text) {
-    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+function serviceTraceId(prefix = "legacy_service") {
+    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
 
+function legacyServiceBotEnabled() {
+    return String(process.env.BOT_REPLY_ENABLED || "false").toLowerCase() === "true";
+}
+
+async function legacyServiceGatewaySend(senderId, messagePayload, meta = {}) {
+    const traceId = meta.traceId || serviceTraceId();
+    const preview = meta.preview || messagePayload?.text || messagePayload?.attachment?.type || "";
+    if (!legacyServiceBotEnabled()) {
+        console.log("[MESSAGE_GATEWAY_BLOCKED_LEGACY_SERVICE]", JSON.stringify({ traceId, senderId: String(senderId), reason: "reply_switch_off", source: meta.source || "legacy_service", preview: String(preview).slice(0, 160) }));
+        return false;
+    }
+    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+    console.log("[MESSAGE_GATEWAY_SEND_REQUEST]", JSON.stringify({ traceId, senderId: String(senderId), source: meta.source || "legacy_service", messageType: meta.messageType || "text", preview: String(preview).slice(0, 180) }));
     const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            recipient: { id: senderId },
-            message: { text }
-        })
+        body: JSON.stringify({ recipient: { id: senderId }, message: messagePayload })
     });
-
     const result = await response.text();
+    let parsed = null;
+    try { parsed = result ? JSON.parse(result) : null; } catch (_) {}
+    console.log("[MESSAGE_GATEWAY_SEND_RESULT]", JSON.stringify({ traceId, senderId: String(senderId), status: response.status, ok: response.ok, message_id: parsed?.message_id || null, recipient_id: parsed?.recipient_id || null, result: String(result || "").slice(0, 500) }));
     console.log("Facebook send status:", response.status);
     console.log("Facebook send result:", result);
+    if (!response.ok) throw new Error(`Facebook send failed: ${response.status} - ${result}`);
+    return true;
+}
 
-    if (!response.ok) {
-        throw new Error(`Facebook send failed: ${response.status} - ${result}`);
-    }
+async function sendMessage(senderId, text) {
+    return legacyServiceGatewaySend(senderId, { text }, { source: "legacy_messengerService.sendMessage", messageType: "text", preview: text });
 }
 
 async function sendTemplate(senderId, elements, logName) {
-    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
-
-    const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            recipient: { id: senderId },
-            message: {
-                attachment: {
-                    type: "template",
-                    payload: {
-                        template_type: "generic",
-                        elements
-                    }
-                }
-            }
-        })
-    });
-
-    const result = await response.text();
-    console.log(`${logName} status:`, response.status);
-    console.log(`${logName} result:`, result);
-
-    if (!response.ok) {
-        throw new Error(`${logName} failed: ${response.status} - ${result}`);
-    }
+    return legacyServiceGatewaySend(senderId, {
+        attachment: {
+            type: "template",
+            payload: { template_type: "generic", elements }
+        }
+    }, { source: "legacy_messengerService.sendTemplate", messageType: "template", preview: logName || "generic_template" });
 }
 
 async function sendComboCarousel(senderId) {

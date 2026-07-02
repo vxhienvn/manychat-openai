@@ -21,7 +21,7 @@ app.use('/admin', express.static(path.join(__dirname, '..', 'public')));
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const AIGUKA_VERSION = '5.4.2-debug-stale-skip-reason';
+const AIGUKA_VERSION = '5.4.6-message-gateway-trace';
 const moduleRegistry = require('./core-module-registry');
 
 // ===== AIGUKA BOT REPLY MASTER SWITCH =====
@@ -1124,7 +1124,15 @@ async function processPendingReplyRow(row) {
         if (afterBotCount <= beforeBotCount) {
             const fallback = buildPendingExecutorFallbackReply(senderId, state, waitingCustomer.text, afterHistory);
             console.log('[PENDING_FALLBACK_SEND]', senderId, row.id, fallback.slice(0, 160));
-            await sendMessage(senderId, fallback);
+            const fallbackSent = await sendMessage(senderId, fallback, { source: "pending_executor_fallback", pendingExecutor: true, traceId: createMessageTraceId("pending_fallback") });
+            if (!fallbackSent) {
+                console.log('[PENDING_BLOCKED_NOT_DONE]', senderId, row.id, 'fallback_send_blocked');
+                await supabaseRequest(`pending_replies?id=eq.${row.id}`, {
+                    method: "PATCH",
+                    body: JSON.stringify({ status: "blocked", reason: "fallback_send_blocked_by_message_gateway", processed_at: new Date().toISOString() })
+                });
+                return;
+            }
             if (!Array.isArray(conversations[senderId])) conversations[senderId] = [];
             conversations[senderId].push(`Bot: ${fallback} | TIME:${Date.now()} | PRODUCT:${state.currentTopic || state.productType || "unknown"} | PENDING_EXECUTOR_FALLBACK:true`);
             saveConversations(conversations);
@@ -3138,6 +3146,81 @@ function isDuplicateBotOutbound(senderId, text = "") {
 }
 
 
+function createMessageTraceId(prefix = "mgw") {
+    return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function getLastCustomerTextForGateway(senderId, state = {}) {
+    if (state.lastCustomerMessage) return String(state.lastCustomerMessage || "").trim();
+    const history = conversations[String(senderId)] || [];
+    const last = getLastWaitingCustomerFromHistory(history);
+    return String(last?.text || "").trim();
+}
+
+function isPriceInquiryText(text = "") {
+    return isPriceRequest(text) || isPriceFirstObjection(text) || /(giá|bao\s*nhiêu|bao\s*tiền|bn|nhiêu\s*tiền|xin\s*giá|báo\s*giá)/i.test(String(text || ""));
+}
+
+function buildMessengerCareValueReply(senderId, state = {}, blockedText = "") {
+    const customerText = getLastCustomerTextForGateway(senderId, state);
+    const productType = state.currentTopic || state.productType || state.lockedProduct || state.productGroup || "";
+    const productLabelText = normalizeProductLabelForPendingReply(productType) || "sản phẩm này";
+
+    if (isPriceInquiryText(customerText)) {
+        return `Dạ ${productLabelText} bên em có nhiều mẫu và nhiều phân khúc nên giá sẽ dao động theo mẫu, kích thước/chất liệu và chương trình hiện tại ạ. Em chỉ báo khoảng giá chung trước để mình dễ hình dung, còn giá chi tiết cần chốt theo đúng mẫu mình chọn. Mình đang quan tâm loại phổ thông, tầm trung hay cao cấp để em tư vấn sát hơn ngay trên Messenger nhé.`;
+    }
+
+    if (/(mẫu|ảnh|hình|xem|gửi\s*mẫu|catalog|catalogue)/i.test(customerText)) {
+        return `Dạ em hiểu rồi ạ. Bên em có khá nhiều mẫu ${productLabelText}, em sẽ ưu tiên vài mẫu bán chạy và đúng nhu cầu để mình dễ xem, không gửi tràn lan. Mình thích phong cách hiện đại, sang trọng hay loại giá tốt hơn ạ?`;
+    }
+
+    if (/(địa\s*chỉ|ở\s*đâu|showroom|cửa\s*hàng|qua\s*xem)/i.test(customerText)) {
+        const address = process.env.SHOP_ADDRESS || "254 Phố Keo, Gia Lâm, Hà Nội";
+        return `Dạ showroom bên em ở ${address} ạ. Mình đang quan tâm nhóm sản phẩm nào để em hướng dẫn khu vực xem hàng và tư vấn đúng hơn trên Messenger nhé.`;
+    }
+
+    if (/(mua\s*sỉ|mua\s*si|mua\s*buôn|đại\s*lý|số\s*lượng|chiết\s*khấu|công\s*trình|dự\s*án|nhập\s*sỉ|lấy\s*sỉ)/i.test(customerText)) {
+        return "Dạ bên em có chính sách cho khách mua sỉ, mua buôn và lấy số lượng ạ. Mỗi nhóm mẫu sẽ có mức chiết khấu khác nhau, mình cho em biết số lượng dự kiến và khu vực giao hàng để em hỗ trợ trước trên Messenger nhé.";
+    }
+
+    return `Dạ em đã nhận được nhu cầu của mình rồi ạ. Em sẽ hỗ trợ trực tiếp trên Messenger trước để mình dễ trao đổi. Mình đang cần em báo khoảng giá, gửi vài mẫu bán chạy hay tư vấn theo kích thước/phong cách cụ thể ạ?`;
+}
+
+function maybeRewriteBlockedPhoneAsk(senderId, text, state = {}, reason = "duplicate_or_rapid_phone_ask") {
+    if (!containsPhoneAsk(text)) return null;
+    const rewrite = buildMessengerCareValueReply(senderId, state, text);
+    if (!rewrite || containsPhoneAsk(rewrite)) return null;
+    console.log("[MESSAGE_GATEWAY_REWRITE]", senderId, reason, "from=", String(text || "").slice(0, 120), "to=", rewrite.slice(0, 160));
+    return rewrite;
+}
+
+async function messageGatewayGraphSend(senderId, messagePayload, meta = {}) {
+    const traceId = meta.traceId || createMessageTraceId("msg");
+    const source = meta.source || "unknown";
+    const messageType = meta.messageType || "text";
+    const preview = meta.preview || (messagePayload?.text || messagePayload?.attachment?.type || "");
+    if (!PAGE_ACCESS_TOKEN) throw new Error("PAGE_ACCESS_TOKEN missing");
+    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
+    console.log("[MESSAGE_GATEWAY_SEND_REQUEST]", JSON.stringify({ traceId, senderId: String(senderId), source, messageType, preview: String(preview || "").slice(0, 180) }));
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipient: { id: senderId }, message: messagePayload })
+    });
+    const result = await response.text();
+    let parsed = null;
+    try { parsed = result ? JSON.parse(result) : null; } catch (_) {}
+    console.log("[MESSAGE_GATEWAY_SEND_RESULT]", JSON.stringify({ traceId, senderId: String(senderId), status: response.status, ok: response.ok, message_id: parsed?.message_id || null, recipient_id: parsed?.recipient_id || null, result: String(result || "").slice(0, 500) }));
+    // Legacy logs kept for current debugging habit.
+    console.log("Facebook send status:", response.status);
+    console.log("Facebook send result:", result);
+    if (!response.ok) {
+        throw new Error(`Facebook send failed: ${response.status} - ${result}`);
+    }
+    return { ok: true, traceId, response, status: response.status, result, parsed };
+}
+
+
 function logBlockedBotReply(senderId, text, reason = "blocked", messageType = "text", extraRaw = {}) {
     try {
         const st = customerStates[String(senderId)] || {};
@@ -3186,31 +3269,25 @@ async function sendMessage(senderId, text, options = {}) {
     }
 
     if (!options.force && isDuplicateBotOutbound(senderId, text)) {
-        console.log("AIGUKA SAFE_SEND blocked: duplicate/rapid phone ask", senderId, String(text || '').slice(0, 120));
-        logBlockedBotReply(senderId, text, "duplicate_or_rapid_phone_ask", "text");
-        return false;
+        const rewrite = maybeRewriteBlockedPhoneAsk(senderId, text, stateForGuard, "duplicate_or_rapid_phone_ask");
+        if (rewrite) {
+            text = applyHumanAddressPolicy(senderId, rewrite, stateForGuard.lastCustomerMessage || "");
+        } else {
+            console.log("AIGUKA SAFE_SEND blocked: duplicate/rapid phone ask", senderId, String(text || '').slice(0, 120));
+            logBlockedBotReply(senderId, text, "duplicate_or_rapid_phone_ask", "text");
+            return false;
+        }
     }
 
-    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
-
-    const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            recipient: { id: senderId },
-            message: { text }
-        })
+    const gatewayResult = await messageGatewayGraphSend(senderId, { text }, {
+        source: options.source || options.reason || (options.pendingExecutor ? "pending_executor" : "sendMessage"),
+        messageType: "text",
+        preview: text,
+        traceId: options.traceId
     });
-
-    const result = await response.text();
-    let parsedSendResult = null;
-    try { parsedSendResult = result ? JSON.parse(result) : null; } catch (_) {}
-    console.log("Facebook send status:", response.status);
-    console.log("Facebook send result:", result);
-
-    if (!response.ok) {
-        throw new Error(`Facebook send failed: ${response.status} - ${result}`);
-    }
+    const response = gatewayResult.response;
+    const result = gatewayResult.result;
+    const parsedSendResult = gatewayResult.parsed;
 
     // Supabase logger: lưu tin bot sau khi Facebook xác nhận gửi thành công.
     const st = customerStates[senderId] || {};
@@ -3236,6 +3313,7 @@ async function sendMessage(senderId, text, options = {}) {
         raw: { source: "bot_api_send", facebook_status: response.status, facebook_result: result, external_message_id: parsedSendResult?.message_id || parsedSendResult?.recipient_id || null },
         externalMessageId: parsedSendResult?.message_id || ""
     }).catch(err => console.error("Supabase bot text log error:", err.message));
+    return true;
 }
 
 
@@ -3367,33 +3445,21 @@ async function sendTemplate(senderId, elements, logName) {
         subtitle: applyHumanAddressPolicy(senderId, el.subtitle || "", (customerStates[String(senderId)] || {}).lastCustomerMessage || "")
     }));
     if (!safeElements.length) throw new Error(`${logName || 'Template'} has no valid public image elements`);
-    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
-
-    const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            recipient: { id: senderId },
-            message: {
-                attachment: {
-                    type: "template",
-                    payload: {
-                        template_type: "generic",
-                        image_aspect_ratio: "square",
-                        elements: safeElements
-                    }
-                }
+    const messagePayload = {
+        attachment: {
+            type: "template",
+            payload: {
+                template_type: "generic",
+                image_aspect_ratio: "square",
+                elements: safeElements
             }
-        })
-    });
-
-    const result = await response.text();
+        }
+    };
+    const gatewayResult = await messageGatewayGraphSend(senderId, messagePayload, { source: "sendTemplate", messageType: "template", preview: logName || "generic_template" });
+    const response = gatewayResult.response;
+    const result = gatewayResult.result;
     console.log(`${logName} status:`, response.status);
     console.log(`${logName} result:`, result);
-
-    if (!response.ok) {
-        throw new Error(`${logName} failed: ${response.status} - ${result}`);
-    }
 
     const st = customerStates[senderId] || {};
     logMessageToSupabase({
@@ -3786,32 +3852,20 @@ async function sendImageMessage(senderId, imageUrl, logName = "Image message") {
         return false;
     }
 
-    const url = `https://graph.facebook.com/v23.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`;
-
-    const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-            recipient: { id: senderId },
-            message: {
-                attachment: {
-                    type: "image",
-                    payload: {
-                        url: imageUrl,
-                        is_reusable: true
-                    }
-                }
+    const messagePayload = {
+        attachment: {
+            type: "image",
+            payload: {
+                url: imageUrl,
+                is_reusable: true
             }
-        })
-    });
-
-    const result = await response.text();
+        }
+    };
+    const gatewayResult = await messageGatewayGraphSend(senderId, messagePayload, { source: "sendImageMessage", messageType: "image", preview: imageUrl || logName || "image" });
+    const response = gatewayResult.response;
+    const result = gatewayResult.result;
     console.log(`${logName} status:`, response.status);
     console.log(`${logName} result:`, result);
-
-    if (!response.ok) {
-        throw new Error(`${logName} failed: ${response.status} - ${result}`);
-    }
 
     const st = customerStates[String(senderId)] || {};
     logMessageToSupabase({
@@ -5351,22 +5405,17 @@ function isPriceFirstObjection(message = "") {
 function buildSafePriceOrPhoneReply(productType, productRow, customerMessage = "") {
     if (productRow) {
         const range = buildPriceRangeReply(productRow, productType);
-        if (range && !normalizeIntentText(range).includes("can kiem tra lai dung mau")) return range;
+        if (range && !normalizeIntentText(range).includes("can kiem tra lai dung mau")) {
+            const cleaned = String(range)
+                .replace(new RegExp("(anh|chị|chú|cô|bác|ông|bà)?\\s*(cho|để lại|gửi)\\s+(em|cháu)?\\s*(xin)?\\s*(số điện thoại|sđt|sdt|zalo)[^.!?\\n]*(\\.|!|\\?|\\n)?", "gi"), "")
+                .replace(/\n{3,}/g, "\n\n")
+                .trim();
+            if (cleaned && !containsPhoneAsk(cleaned)) return cleaned;
+        }
     }
 
-    if (productType === "fan") {
-        return "Dạ mẫu quạt bên em có nhiều phiên bản, giá khoảng 4,39 triệu đến 8,45 triệu tùy động cơ và phân khúc ạ. Nếu anh thấy tầm giá phù hợp, anh để lại SĐT/Zalo để bên em gửi đúng mẫu trong quảng cáo và báo chi tiết nhé.";
-    }
-    if (productType === "kitchen") {
-        return "Dạ nhóm bếp từ - hút mùi bên em có nhiều phân khúc, thường từ khoảng 5 triệu đến hơn 20 triệu tùy bộ ạ. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu phù hợp và báo chi tiết nhé.";
-    }
-    if (productType === "toilet") {
-        return "Dạ bồn cầu thông minh bên em có nhiều phiên bản từ cơ bản đến cao cấp. Giá phụ thuộc tính năng như tự rửa, sấy, tự xả, UV và điều khiển. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu trong quảng cáo và báo chi tiết nhé.";
-    }
-    if (productType === "vanity") {
-        return "Dạ tủ chậu gương/tủ lavabo bên em có nhiều kích thước và chất liệu, giá thay đổi theo bộ. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu, kích thước và báo chi tiết cho mình nhé.";
-    }
-    return "Dạ nhóm sản phẩm này có nhiều mẫu và phân khúc khác nhau. Anh để lại SĐT/Zalo, bên em gửi đúng mẫu phù hợp và báo giá chi tiết nhé.";
+    const label = normalizeProductLabelForPendingReply(productType) || "sản phẩm này";
+    return `Dạ ${label} bên em có nhiều mẫu và nhiều phân khúc nên giá sẽ dao động theo mẫu, kích thước/chất liệu và chương trình hiện tại ạ. Em chỉ báo khoảng giá chung trước để mình dễ hình dung, còn giá chi tiết cần chốt theo đúng mẫu mình chọn. Mình đang quan tâm loại phổ thông, tầm trung hay cao cấp để em tư vấn sát hơn ngay trên Messenger nhé.`;
 }
 
 function buildWelcomeText(productType, isOldCustomer, inOffice = isOfficeHoursVN()) {
